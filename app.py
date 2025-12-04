@@ -1984,75 +1984,118 @@ def create_gradio_app():
 
             # ==================== History Tab ====================
             with gr.TabItem("📜 History", id="history_tab"):
-                gr.HTML('<h2 style="text-align: center; color: #667eea; margin: 20px 0;">📜 Pipeline Run History</h2>')
+                # Access denied message (shown for unauthorized users)
+                history_access_denied = gr.HTML(
+                    value="""
+                    <div style='padding: 60px; text-align: center;'>
+                        <h2 style='color: #e74c3c;'>🔒 Access Denied</h2>
+                        <p style='color: var(--body-text-color-subdued); font-size: 16px;'>
+                            You don't have permission to view the pipeline history.<br>
+                            Please contact the administrator if you need access.
+                        </p>
+                    </div>
+                    """,
+                    visible=False,
+                )
 
-                with gr.Row():
-                    # Left Panel - History List
-                    with gr.Column(scale=1, elem_classes=["history-list-panel"]):
-                        with gr.Row():
-                            history_status_filter = gr.Dropdown(
-                                choices=["All", "Success", "Failed", "Partial", "Running"],
-                                value="All",
-                                label="Filter by Status",
-                                scale=2,
-                            )
-                            history_refresh_btn = gr.Button("🔄 Refresh", scale=1)
+                # History content container (hidden for unauthorized users)
+                with gr.Column(visible=True) as history_content:
+                    gr.HTML('<h2 style="text-align: center; color: #667eea; margin: 20px 0;">📜 Pipeline Run History</h2>')
 
-                        history_table = gr.Dataframe(
-                            headers=["ID", "Query", "Date", "Status", "Videos", "Transcripts", "Summaries", "Duration", "Full ID"],
-                            datatype=["str", "str", "str", "str", "number", "number", "number", "str", "str"],
-                            column_count=(9, "fixed"),
-                            row_count=(10, "dynamic"),
-                            interactive=False,
-                            label="Pipeline Runs",
-                            wrap=True,
-                        )
+                    with gr.Row():
+                        # Left Panel - History List
+                        with gr.Column(scale=1, elem_classes=["history-list-panel"]):
+                            with gr.Row():
+                                history_status_filter = gr.Dropdown(
+                                    choices=["All", "Success", "Failed", "Partial", "Running"],
+                                    value="All",
+                                    label="Filter by Status",
+                                    scale=2,
+                                )
+                                history_refresh_btn = gr.Button("🔄 Refresh", scale=1)
 
-                        with gr.Row():
-                            history_prev_btn = gr.Button("◀ Previous", scale=1)
-                            history_page_info = gr.Textbox(
-                                value="Page 1",
-                                label="",
+                            history_table = gr.Dataframe(
+                                headers=["ID", "Query", "Date", "Status", "Videos", "Transcripts", "Summaries", "Duration", "Full ID"],
+                                datatype=["str", "str", "str", "str", "number", "number", "number", "str", "str"],
+                                column_count=(9, "fixed"),
+                                row_count=(10, "dynamic"),
                                 interactive=False,
-                                scale=1,
-                            )
-                            history_next_btn = gr.Button("Next ▶", scale=1)
-
-                        history_status_msg = gr.Textbox(
-                            label="Status",
-                            interactive=False,
-                            lines=1,
-                        )
-
-                    # Right Panel - Run Details
-                    with gr.Column(scale=1, elem_classes=["history-detail-panel"]):
-                        run_details_html = gr.HTML(
-                            value="<div style='padding: 40px; text-align: center; color: var(--body-text-color-subdued);'>Select a run from the list to view details</div>",
-                            label="Run Details",
-                        )
-
-                        with gr.Row():
-                            rerun_btn = gr.Button("🔄 Re-run Pipeline", variant="primary", scale=1)
-                            delete_btn = gr.Button("🗑️ Delete Run", variant="stop", scale=1)
-
-                        with gr.Row():
-                            delete_files_checkbox = gr.Checkbox(
-                                value=False,
-                                label="Also delete output files",
-                                info="Check to delete the output folder along with the database record",
+                                label="Pipeline Runs",
+                                wrap=True,
                             )
 
-                        delete_result_msg = gr.Textbox(
-                            label="Action Result",
-                            interactive=False,
-                            lines=1,
-                            visible=True,
-                        )
+                            with gr.Row():
+                                history_prev_btn = gr.Button("◀ Previous", scale=1)
+                                history_page_info = gr.Textbox(
+                                    value="Page 1",
+                                    label="",
+                                    interactive=False,
+                                    scale=1,
+                                )
+                                history_next_btn = gr.Button("Next ▶", scale=1)
+
+                            history_status_msg = gr.Textbox(
+                                label="Status",
+                                interactive=False,
+                                lines=1,
+                            )
+
+                        # Right Panel - Run Details
+                        with gr.Column(scale=1, elem_classes=["history-detail-panel"]):
+                            run_details_html = gr.HTML(
+                                value="<div style='padding: 40px; text-align: center; color: var(--body-text-color-subdued);'>Select a run from the list to view details</div>",
+                                label="Run Details",
+                            )
+
+                            with gr.Row():
+                                rerun_btn = gr.Button("🔄 Re-run Pipeline", variant="primary", scale=1)
+                                delete_btn = gr.Button("🗑️ Delete Run", variant="stop", scale=1)
+
+                            with gr.Row():
+                                delete_files_checkbox = gr.Checkbox(
+                                    value=False,
+                                    label="Also delete output files",
+                                    info="Check to delete the output folder along with the database record",
+                                )
+
+                            delete_result_msg = gr.Textbox(
+                                label="Action Result",
+                                interactive=False,
+                                lines=1,
+                                visible=True,
+                            )
 
                 # Hidden state for tracking
                 selected_run_id = gr.State(value="")
                 current_page = gr.State(value=1)
                 total_pages = gr.State(value=1)
+
+                # History authorization check
+                def check_history_access(request: gr.Request = None):
+                    """Check if current user is allowed to access History tab."""
+                    allowed_emails = os.getenv("ALLOWED_HISTORY_EMAILS", "").split(",")
+                    allowed_emails = [e.strip().lower() for e in allowed_emails if e.strip()]
+
+                    # If no allowed emails configured, allow all authenticated users
+                    if not allowed_emails:
+                        return gr.update(visible=True), gr.update(visible=False)
+
+                    user_email = "anonymous"
+                    if request:
+                        try:
+                            import gradiologin as gl
+                            user = gl.get_user(request)
+                            if user:
+                                user_email = user.get("email", "").lower()
+                        except Exception:
+                            pass
+
+                    if user_email in allowed_emails:
+                        # User is authorized - show content, hide access denied
+                        return gr.update(visible=True), gr.update(visible=False)
+                    else:
+                        # User is not authorized - hide content, show access denied
+                        return gr.update(visible=False), gr.update(visible=True)
 
                 # History event handlers
                 def on_history_refresh(status_filter, request: gr.Request = None):
@@ -2153,6 +2196,27 @@ def create_gradio_app():
                     inputs=[selected_run_id],
                     outputs=[search_query, max_videos, transcript_language, num_workers, use_env_keys, main_tabs],
                 )
+
+        # Check history access when History tab is selected
+        def on_tab_select(evt: gr.SelectData, request: gr.Request = None):
+            """Handle tab selection - check access when History tab is selected."""
+            if evt.value == "📜 History":
+                return check_history_access(request)
+            # Return no change for other tabs
+            return gr.update(), gr.update()
+
+        main_tabs.select(
+            fn=on_tab_select,
+            inputs=[],
+            outputs=[history_content, history_access_denied],
+        )
+
+        # Check history access on page load
+        app.load(
+            fn=check_history_access,
+            inputs=[],
+            outputs=[history_content, history_access_denied],
+        )
 
     return app, css
 
@@ -2271,12 +2335,10 @@ if __name__ == "__main__":
         gradio_app, css = create_gradio_app()
 
         # Mount Gradio with OAuth protection
-        app_url = os.getenv("APP_URL", f"http://localhost:{args.port}")
         gl.mount_gradio_app(
             fastapi_app,
             gradio_app,
             "/app",
-            app_url=app_url,
         )
 
         # Redirect root to app
