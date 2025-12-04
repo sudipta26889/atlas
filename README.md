@@ -134,6 +134,7 @@ docker run -p 7860:7860 --env-file .env ghcr.io/sudipta26889/atlas:latest
 | `GOOGLE_CLIENT_ID` | No | Google OAuth client ID |
 | `GOOGLE_CLIENT_SECRET` | No | Google OAuth client secret |
 | `ALLOWED_HISTORY_EMAILS` | No | Comma-separated list of admin emails |
+| `YOUTUBE_PROXY` | No | Proxy URL for YouTube requests (bypasses cloud IP blocks) |
 
 ### Config File
 
@@ -168,6 +169,13 @@ atlas/
 Atlas uses a dual-method approach for reliable transcript extraction:
 1. **Primary**: `youtube-transcript-api` - Fast, no authentication required
 2. **Fallback**: `yt-dlp` - Handles edge cases, supports cookies for bot bypass
+
+**Cloud Deployment Note**: YouTube blocks requests from cloud provider IPs (AWS, GCP, Azure, etc.). Set `YOUTUBE_PROXY` to a residential/datacenter proxy to bypass this:
+```bash
+YOUTUBE_PROXY=socks5://user:pass@proxy-host:1080
+# or
+YOUTUBE_PROXY=http://user:pass@proxy-host:8080
+```
 
 ### Authentication Flow
 1. User accesses the app → Redirected to Google OAuth

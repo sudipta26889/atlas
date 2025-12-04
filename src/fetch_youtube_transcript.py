@@ -2,6 +2,7 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional, Tuple
+from urllib.parse import urlparse
 
 from src.utils import ensure_output_folder, get_config, get_worker_count, setup_logging
 
@@ -19,6 +20,7 @@ class YouTubeTranscriptFetcher:
         output_folder: Optional[str] = None,
         language: Optional[str] = None,
         num_workers: Optional[int] = None,
+        proxy: Optional[str] = None,
     ):
         """Initialize the YouTubeTranscriptFetcher.
 
@@ -28,6 +30,8 @@ class YouTubeTranscriptFetcher:
             language (Optional[str]): Language code for subtitles. If None, uses config default.
             num_workers (Optional[int]): Number of concurrent workers for parallel processing.
                 If None, auto-detects based on config and CPU count.
+            proxy (Optional[str]): Proxy URL for bypassing IP blocks (e.g., socks5://user:pass@host:port).
+                If None, uses YOUTUBE_PROXY environment variable.
         """
         # Initialize configuration and logging
         setup_logging()
@@ -39,8 +43,34 @@ class YouTubeTranscriptFetcher:
         self.language = language or get_config("processing.transcripts.language", "en")
         self.num_workers = get_worker_count(num_workers)
 
+        # Proxy configuration (for bypassing cloud provider IP blocks)
+        self.proxy = proxy or os.getenv("YOUTUBE_PROXY", "")
+        if self.proxy:
+            print(f"[PROXY] Using proxy: {self._mask_proxy_url(self.proxy)}")
+
         # Ensure output folder exists
         self.output_folder = ensure_output_folder(self.output_folder)
+
+    def _mask_proxy_url(self, proxy_url: str) -> str:
+        """Mask sensitive parts of proxy URL for logging.
+
+        Args:
+            proxy_url: Full proxy URL potentially containing credentials.
+
+        Returns:
+            Masked URL safe for logging.
+        """
+        try:
+            parsed = urlparse(proxy_url)
+            if parsed.username:
+                # Mask username and password
+                masked = f"{parsed.scheme}://***:***@{parsed.hostname}"
+                if parsed.port:
+                    masked += f":{parsed.port}"
+                return masked
+            return proxy_url
+        except Exception:
+            return "***masked***"
 
     def _extract_video_id(self, url: str) -> Optional[str]:
         """Extract video ID from YouTube URL.
@@ -104,9 +134,18 @@ class YouTubeTranscriptFetcher:
         """
         try:
             from youtube_transcript_api import YouTubeTranscriptApi
+            from youtube_transcript_api.proxies import GenericProxyConfig
 
-            # Create API instance (v1.2.3+ uses instance methods)
-            ytt_api = YouTubeTranscriptApi()
+            # Create API instance with proxy if configured
+            if self.proxy:
+                proxy_config = GenericProxyConfig(
+                    http_url=self.proxy,
+                    https_url=self.proxy,
+                )
+                ytt_api = YouTubeTranscriptApi(proxy_config=proxy_config)
+                print(f"[TRANSCRIPT-API] Using proxy for {video_id}")
+            else:
+                ytt_api = YouTubeTranscriptApi()
 
             # Try to list available transcripts first
             try:
@@ -180,6 +219,11 @@ class YouTubeTranscriptFetcher:
                 "no_warnings": True,
                 "geo_bypass": True,
             }
+
+            # Add proxy if configured
+            if self.proxy:
+                opts["proxy"] = self.proxy
+                print(f"[YT-DLP] Using proxy for {video_id}")
 
             # Check for cookies file
             cookies_paths = [
