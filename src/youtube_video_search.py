@@ -75,13 +75,26 @@ def search_youtube_videos_api(search_query, max_results=None):
             "YouTube API key is required. Set YOUTUBE_API_KEY environment variable."
         )
 
+    # Force IPv4 to avoid IPv6 timeout issues
+    import socket
+    original_getaddrinfo = socket.getaddrinfo
+
+    def getaddrinfo_ipv4_only(host, port, family=0, type=0, proto=0, flags=0):
+        return original_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+
+    socket.getaddrinfo = getaddrinfo_ipv4_only
+
     try:
         # Build the YouTube API client
         youtube_config = get_config("api.youtube", {})
         api_version = youtube_config.get("api_version", "v3")
-        timeout = youtube_config.get("timeout", 30)
+        timeout = youtube_config.get("timeout", 60)
 
-        youtube = build("youtube", api_version, developerKey=api_key)
+        # Create HTTP client with proper timeout
+        import httplib2
+        http = httplib2.Http(timeout=timeout)
+
+        youtube = build("youtube", api_version, developerKey=api_key, http=http)
 
         # Call the search.list method to retrieve results matching the query
         search_request = youtube.search().list(
@@ -92,10 +105,7 @@ def search_youtube_videos_api(search_query, max_results=None):
             order=youtube_config.get("order", "relevance"),
         )
 
-        # Execute with timeout handling
-        import socket
-
-        socket.setdefaulttimeout(timeout)
+        # Execute the request
         search_response = search_request.execute()
 
         # Extract video IDs from search results
@@ -167,6 +177,10 @@ def search_youtube_videos_api(search_query, max_results=None):
 
     except Exception as e:
         raise Exception(f"Error searching YouTube videos: {str(e)}")
+
+    finally:
+        # Restore original getaddrinfo
+        socket.getaddrinfo = original_getaddrinfo
 
 
 def format_video_results(videos, search_query):

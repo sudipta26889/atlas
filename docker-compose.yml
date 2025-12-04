@@ -1,0 +1,60 @@
+version: "3.8"
+
+services:
+  atlas:
+    image: ${REGISTRY:-}atlas:${TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - YOUTUBE_API_KEY=${YOUTUBE_API_KEY}
+      - MYSQL_HOST=${MYSQL_HOST:-mysql}
+      - MYSQL_PORT=${MYSQL_PORT:-3306}
+      - MYSQL_USER=${MYSQL_USER:-atlas_db_user}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - MYSQL_DATABASE=${MYSQL_DATABASE:-atlas_db}
+      - GRADIO_SERVER_NAME=0.0.0.0
+      - GRADIO_ANALYTICS_ENABLED=False
+    ports:
+      - "${ATLAS_PORT:-7860}:7860"
+    volumes:
+      - atlas_output:/app/output
+    networks:
+      - atlas_network
+    deploy:
+      mode: replicated
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      resources:
+        limits:
+          cpus: "2"
+          memory: 4G
+        reservations:
+          cpus: "0.5"
+          memory: 1G
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.atlas.rule=Host(`${ATLAS_DOMAIN:-atlas.localhost}`)"
+        - "traefik.http.routers.atlas.entrypoints=websecure"
+        - "traefik.http.routers.atlas.tls.certresolver=letsencrypt"
+        - "traefik.http.services.atlas.loadbalancer.server.port=7860"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  atlas_output:
+    driver: local
+
+networks:
+  atlas_network:
+    driver: overlay
+    attachable: true

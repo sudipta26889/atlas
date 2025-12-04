@@ -101,6 +101,10 @@ pipeline_state = {
     "summaries_output": "",
     "comparison_table": "",
     "assignments_output": "",
+    # History tracking fields
+    "run_id": None,
+    "db": None,
+    "start_time": None,
 }
 
 
@@ -132,6 +136,10 @@ def step1_search_videos(
             "summaries_output": "",
             "comparison_table": "",
             "assignments_output": "",
+            # History tracking fields
+            "run_id": None,
+            "db": None,
+            "start_time": time.time(),
         }
 
         # Validate inputs
@@ -176,6 +184,27 @@ def step1_search_videos(
         # Store videos in global state
         pipeline_state["videos"] = videos
 
+        # Initialize database connection for history tracking (after successful search)
+        try:
+            from src.database import get_db_or_none
+            db = get_db_or_none()
+            if db:
+                run_id = db.create_run(
+                    search_query=search_query,
+                    output_folder_path=pipeline.output_folder,
+                    config={
+                        "max_videos": max_videos,
+                        "transcript_language": transcript_language,
+                        "num_workers": num_workers,
+                        "use_env_keys": use_env_keys,
+                    },
+                )
+                pipeline_state["db"] = db
+                pipeline_state["run_id"] = run_id
+                db.update_run_progress(run_id=run_id, video_count=len(videos))
+        except Exception as db_error:
+            print(f"[DB] Warning: Failed to initialize history tracking: {db_error}")
+
         # Format and store search results
         search_results = format_search_results(videos)
         pipeline_state["search_results"] = search_results
@@ -186,7 +215,6 @@ def step1_search_videos(
     except Exception as e:
         print(f"[ERROR] Video search failed: {str(e)}")
         import traceback
-
         traceback.print_exc()
         return f"❌ Video Search Error: {str(e)}"
 
@@ -206,6 +234,10 @@ def step2_fetch_transcripts(
     try:
         global pipeline_state
 
+        # Check if previous step failed
+        if search_results_input and search_results_input.startswith("❌"):
+            return search_results_input  # Pass through the error
+
         # Check if we have valid state from previous step
         if not pipeline_state["pipeline"] or not pipeline_state["videos"]:
             return "❌ Error: No valid pipeline state. Please run video search first."
@@ -220,6 +252,13 @@ def step2_fetch_transcripts(
         # Store transcript paths in global state
         pipeline_state["transcript_paths"] = transcript_paths
 
+        # Update database with transcript count
+        if pipeline_state.get("db") and pipeline_state.get("run_id"):
+            pipeline_state["db"].update_run_progress(
+                run_id=pipeline_state["run_id"],
+                transcript_count=len(transcript_paths),
+            )
+
         # Format transcript results
         transcripts_output = format_transcript_results(
             transcript_paths, videos, pipeline.transcripts_folder
@@ -232,7 +271,6 @@ def step2_fetch_transcripts(
     except Exception as e:
         print(f"[ERROR] Transcript fetching failed: {str(e)}")
         import traceback
-
         traceback.print_exc()
         return f"❌ Transcript Fetching Error: {str(e)}"
 
@@ -251,6 +289,10 @@ def step3_generate_summaries(
     """
     try:
         global pipeline_state
+
+        # Check if previous step failed
+        if transcripts_input and transcripts_input.startswith("❌"):
+            return transcripts_input  # Pass through the error
 
         # Check if we have valid state from previous steps
         if (
@@ -278,6 +320,22 @@ def step3_generate_summaries(
                 transcript_paths, videos, pipeline.summaries_folder
             )
             pipeline_state["summaries_output"] = summaries_output
+
+            # Update database with summary count
+            if pipeline_state.get("db") and pipeline_state.get("run_id"):
+                # Count successful summaries
+                summary_count = 0
+                for transcript_path in transcript_paths:
+                    filename = os.path.basename(transcript_path)
+                    video_id = filename.split(".")[0]
+                    summary_filename = f"{video_id}_summary.json"
+                    summary_path = os.path.join(pipeline.summaries_folder, summary_filename)
+                    if os.path.exists(summary_path):
+                        summary_count += 1
+                pipeline_state["db"].update_run_progress(
+                    run_id=pipeline_state["run_id"],
+                    summary_count=summary_count,
+                )
 
             progress(1.0, desc="✅ AI summarization completed!")
             return summaries_output
@@ -309,6 +367,10 @@ def step4_generate_comparison(
     """
     try:
         global pipeline_state
+
+        # Check if previous step failed
+        if summaries_input and summaries_input.startswith("❌"):
+            return summaries_input  # Pass through the error
 
         # Check if we have valid state from previous steps
         if not pipeline_state["pipeline"]:
@@ -347,6 +409,10 @@ def step5_generate_assignments(
     """
     try:
         global pipeline_state
+
+        # Check if previous step failed - propagate the error
+        if comparison_input and comparison_input.startswith("❌"):
+            return comparison_input
 
         # Check if we have valid state from previous steps
         if not pipeline_state["pipeline"]:
@@ -409,13 +475,32 @@ def step5_generate_assignments(
         )
         pipeline_state["assignments_output"] = assignments_output
 
+        # Complete the run record in database
+        try:
+            if pipeline_state.get("db") and pipeline_state.get("run_id"):
+                successful_count = sum(assignment_results.values()) if assignment_results else 0
+                total_count = len(assignment_results) if assignment_results else 0
+                if successful_count == total_count and total_count > 0:
+                    status = "success"
+                elif successful_count > 0:
+                    status = "partial"
+                else:
+                    status = "failed"
+                pipeline_state["db"].complete_run(
+                    run_id=pipeline_state["run_id"],
+                    status=status,
+                    duration_seconds=time.time() - pipeline_state.get("start_time", time.time()),
+                    error_message=None,
+                )
+        except Exception as db_error:
+            print(f"[DB] Warning: Failed to complete run record: {db_error}")
+
         progress(1.0, desc="✅ Assignment generation completed!")
         return assignments_output
 
     except Exception as e:
         print(f"[ERROR] Assignment generation failed: {str(e)}")
         import traceback
-
         traceback.print_exc()
         return f"❌ Assignment Generation Error: {str(e)}"
 
@@ -1149,6 +1234,267 @@ def format_search_results(videos: List[Dict]) -> str:
     return results
 
 
+# ==================== History Tab Helper Functions ====================
+
+
+def load_history_list(
+    status_filter: str = "All", page: int = 1, page_size: int = 10
+) -> Tuple[List[List], int, str]:
+    """
+    Load pipeline run history from database.
+
+    Returns:
+        Tuple of (dataframe_data, total_pages, status_message)
+    """
+    from src.database import get_db_or_none
+
+    db = get_db_or_none()
+    if db is None:
+        return [], 1, "Database connection unavailable"
+
+    # Get status filter
+    filter_status = None if status_filter == "All" else status_filter.lower()
+
+    # Get paginated runs
+    offset = (page - 1) * page_size
+    runs = db.get_all_runs(limit=page_size, offset=offset, status_filter=filter_status)
+    total_count = db.get_run_count(status_filter=filter_status)
+    total_pages = max(1, (total_count + page_size - 1) // page_size)
+
+    # Format for dataframe
+    data = []
+    for run in runs:
+        status_emoji = {
+            "success": "✅",
+            "failed": "❌",
+            "partial": "⚠️",
+            "running": "🔄",
+        }.get(run["status"], "❓")
+
+        # Format timestamp
+        timestamp = run["timestamp"]
+        if timestamp:
+            timestamp_str = timestamp.strftime("%Y-%m-%d %H:%M")
+        else:
+            timestamp_str = "N/A"
+
+        # Format duration
+        duration = run["duration_seconds"]
+        if duration:
+            duration_str = f"{duration:.1f}s"
+        else:
+            duration_str = "N/A"
+
+        data.append(
+            [
+                run["run_id"][:8],  # Short ID
+                run["search_query"][:50] + ("..." if len(run["search_query"]) > 50 else ""),
+                timestamp_str,
+                f"{status_emoji} {run['status'].title()}",
+                run["video_count"],
+                run["transcript_count"],
+                run["summary_count"],
+                duration_str,
+                run["run_id"],  # Full ID (hidden column for selection)
+            ]
+        )
+
+    status_msg = f"Showing {len(data)} of {total_count} runs (Page {page}/{total_pages})"
+    return data, total_pages, status_msg
+
+
+def load_run_details(run_id: str) -> str:
+    """Load and format details for a specific run."""
+    if not run_id:
+        return "<div style='padding: 20px; text-align: center;'>Select a run to view details</div>"
+
+    from src.database import get_db_or_none
+
+    db = get_db_or_none()
+    if db is None:
+        return "<div style='padding: 20px; color: #dc3545;'>Database connection unavailable</div>"
+
+    run = db.get_run(run_id)
+    if not run:
+        return f"<div style='padding: 20px; color: #dc3545;'>Run not found: {run_id}</div>"
+
+    # Status styling
+    status_colors = {
+        "success": "#28a745",
+        "failed": "#dc3545",
+        "partial": "#ffc107",
+        "running": "#17a2b8",
+    }
+    status_color = status_colors.get(run["status"], "#6c757d")
+
+    # Format config
+    config = {}
+    if run["config_json"]:
+        try:
+            config = json.loads(run["config_json"])
+        except json.JSONDecodeError:
+            config = {}
+
+    # Format timestamp
+    timestamp = run["timestamp"]
+    timestamp_str = timestamp.strftime("%Y-%m-%d %H:%M:%S") if timestamp else "N/A"
+
+    # Format duration
+    duration = run["duration_seconds"]
+    duration_str = f"{duration:.2f} seconds" if duration else "N/A"
+
+    # Check if output folder exists
+    output_exists = os.path.exists(run["output_folder_path"])
+    folder_status = "✅ Available" if output_exists else "❌ Not found"
+
+    html = f"""
+    <div class="run-details" style="background: var(--background-fill-secondary); padding: 20px; border-radius: 10px; border: 1px solid var(--border-color-primary);">
+        <h3 style="margin-bottom: 15px; color: var(--body-text-color);">📋 Run Details</h3>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 20px;">
+            <div>
+                <strong style="color: var(--body-text-color);">Run ID:</strong><br/>
+                <code style="font-size: 12px;">{run["run_id"]}</code>
+            </div>
+            <div>
+                <strong style="color: var(--body-text-color);">Status:</strong><br/>
+                <span style="background-color: {status_color}; color: white; padding: 4px 12px; border-radius: 12px; font-weight: bold;">
+                    {run["status"].upper()}
+                </span>
+            </div>
+        </div>
+
+        <div style="margin-bottom: 15px;">
+            <strong style="color: var(--body-text-color);">Search Query:</strong><br/>
+            <div style="background: var(--background-fill-primary); padding: 10px; border-radius: 6px; margin-top: 5px;">
+                {run["search_query"]}
+            </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 15px;">
+            <div style="text-align: center; background: var(--background-fill-primary); padding: 15px; border-radius: 8px;">
+                <div style="font-size: 24px; font-weight: bold; color: #667eea;">{run["video_count"]}</div>
+                <div style="font-size: 12px; color: var(--body-text-color-subdued);">Videos</div>
+            </div>
+            <div style="text-align: center; background: var(--background-fill-primary); padding: 15px; border-radius: 8px;">
+                <div style="font-size: 24px; font-weight: bold; color: #28a745;">{run["transcript_count"]}</div>
+                <div style="font-size: 12px; color: var(--body-text-color-subdued);">Transcripts</div>
+            </div>
+            <div style="text-align: center; background: var(--background-fill-primary); padding: 15px; border-radius: 8px;">
+                <div style="font-size: 24px; font-weight: bold; color: #764ba2;">{run["summary_count"]}</div>
+                <div style="font-size: 12px; color: var(--body-text-color-subdued);">Summaries</div>
+            </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px;">
+            <div>
+                <strong style="color: var(--body-text-color);">Timestamp:</strong><br/>
+                {timestamp_str}
+            </div>
+            <div>
+                <strong style="color: var(--body-text-color);">Duration:</strong><br/>
+                {duration_str}
+            </div>
+        </div>
+
+        <div style="margin-bottom: 15px;">
+            <strong style="color: var(--body-text-color);">Output Folder:</strong><br/>
+            <code style="font-size: 11px; word-break: break-all;">{run["output_folder_path"]}</code>
+            <span style="margin-left: 10px;">{folder_status}</span>
+        </div>
+
+        <div style="margin-bottom: 15px;">
+            <strong style="color: var(--body-text-color);">Configuration:</strong><br/>
+            <div style="background: var(--background-fill-primary); padding: 10px; border-radius: 6px; margin-top: 5px; font-family: monospace; font-size: 12px;">
+                Max Videos: {config.get("max_videos", "N/A")}<br/>
+                Language: {config.get("transcript_language", "N/A")}<br/>
+                Workers: {config.get("num_workers", "N/A")}
+            </div>
+        </div>
+
+        {"<div style='margin-bottom: 15px;'><strong style='color: #dc3545;'>Error:</strong><br/><div style='background: #fff5f5; padding: 10px; border-radius: 6px; color: #dc3545; margin-top: 5px;'>" + run["error_message"] + "</div></div>" if run["error_message"] else ""}
+    </div>
+    """
+    return html
+
+
+def delete_run_handler(run_id: str, delete_files: bool) -> Tuple[str, List[List], str]:
+    """Delete a run from the database and optionally delete output files."""
+    import shutil
+
+    if not run_id:
+        return "No run selected", [], ""
+
+    from src.database import get_db_or_none
+
+    db = get_db_or_none()
+    if db is None:
+        return "Database connection unavailable", [], ""
+
+    # Get run info first
+    run = db.get_run(run_id)
+    if not run:
+        return f"Run not found: {run_id}", [], ""
+
+    # Delete files if requested
+    files_deleted = False
+    if delete_files and run["output_folder_path"]:
+        try:
+            if os.path.exists(run["output_folder_path"]):
+                shutil.rmtree(run["output_folder_path"])
+                files_deleted = True
+        except Exception as e:
+            return f"Failed to delete files: {str(e)}", [], ""
+
+    # Delete from database
+    if db.delete_run(run_id):
+        msg = f"✅ Run {run_id[:8]}... deleted successfully"
+        if files_deleted:
+            msg += " (including output files)"
+        # Refresh the list
+        new_data, _, status = load_history_list()
+        return msg, new_data, ""
+    else:
+        return f"❌ Failed to delete run {run_id[:8]}...", [], ""
+
+
+def rerun_pipeline_handler(run_id: str) -> Tuple[str, int, str, int, bool]:
+    """
+    Load configuration from a previous run for re-execution.
+
+    Returns:
+        Tuple of (search_query, max_videos, transcript_language, num_workers, use_env_keys)
+    """
+    if not run_id:
+        return "", 2, "en", 2, True
+
+    from src.database import get_db_or_none
+
+    db = get_db_or_none()
+    if db is None:
+        return "", 2, "en", 2, True
+
+    run = db.get_run(run_id)
+    if not run:
+        return "", 2, "en", 2, True
+
+    # Parse config
+    config = {}
+    if run["config_json"]:
+        try:
+            config = json.loads(run["config_json"])
+        except json.JSONDecodeError:
+            config = {}
+
+    return (
+        run["search_query"],
+        config.get("max_videos", 2),
+        config.get("transcript_language", "en"),
+        config.get("num_workers", 2),
+        config.get("use_env_keys", True),
+    )
+
+
 def create_gradio_app():
     """Create and configure the Gradio application."""
 
@@ -1286,6 +1632,58 @@ def create_gradio_app():
     .info-box h4, .info-box li, .info-box ul {
         color: var(--body-text-color) !important;
     }
+
+    /* History tab styling */
+    .history-list-panel {
+        border-right: 1px solid var(--border-color-primary);
+        padding-right: 15px;
+    }
+
+    .history-detail-panel {
+        padding-left: 15px;
+    }
+
+    .history-controls {
+        display: flex;
+        gap: 10px;
+        margin-bottom: 15px;
+        align-items: center;
+    }
+
+    .history-table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+
+    .history-table th, .history-table td {
+        padding: 10px;
+        border-bottom: 1px solid var(--border-color-primary);
+        text-align: left;
+    }
+
+    .history-table tr:hover {
+        background: var(--background-fill-secondary);
+        cursor: pointer;
+    }
+
+    .pagination-controls {
+        display: flex;
+        justify-content: center;
+        gap: 10px;
+        margin-top: 15px;
+        align-items: center;
+    }
+
+    .action-buttons {
+        display: flex;
+        gap: 10px;
+        margin-top: 15px;
+    }
+
+    .status-success { color: #28a745; }
+    .status-failed { color: #dc3545; }
+    .status-partial { color: #ffc107; }
+    .status-running { color: #17a2b8; }
     """
 
     with gr.Blocks(title="🎬 Atlas") as app:
@@ -1303,257 +1701,415 @@ def create_gradio_app():
                         <div>📝 <strong>Assignment Generator</strong><br/>Educational content creation</div>
                         <div>🤖 <strong>AI Analysis</strong><br/>Parallel content processing</div>
                         <div>📊 <strong>Comparison Engine</strong><br/>Multi-video insights</div>
-                        <div>⚡ <strong>Real-time Tracking</strong><br/>Progressive visualization</div>
+                        <div>📜 <strong>History</strong><br/>Track & re-run pipelines</div>
                     </div>
                 </div>
                 """
                 )
 
-        # Input Configuration Section
-        with gr.Column(elem_classes=["input-section"]):
-            gr.HTML('<h3 class="section-header">🔍 Search Configuration</h3>')
+        # Main tabs
+        with gr.Tabs() as main_tabs:
+            # ==================== Pipeline Tab ====================
+            with gr.TabItem("🔍 Pipeline", id="pipeline_tab"):
+                # Input Configuration Section
+                with gr.Column(elem_classes=["input-section"]):
+                    gr.HTML('<h3 class="section-header">🔍 Search Configuration</h3>')
 
-            search_query = gr.Textbox(
-                label="YouTube Search Query",
-                placeholder="e.g., 'Python machine learning tutorial', 'React best practices', 'Docker deployment guide'",
-                lines=3,
-                info="Enter your search query to find relevant YouTube videos",
-            )
+                    search_query = gr.Textbox(
+                        label="YouTube Search Query",
+                        placeholder="e.g., 'Python machine learning tutorial', 'React best practices', 'Docker deployment guide'",
+                        lines=3,
+                        info="Enter your search query to find relevant YouTube videos",
+                    )
 
-            with gr.Row():
-                max_videos = gr.Slider(
-                    minimum=1,
-                    maximum=10,
-                    value=2,
-                    step=1,
-                    label="Max Videos",
-                    info="Maximum number of videos to process",
-                )
+                    with gr.Row():
+                        max_videos = gr.Slider(
+                            minimum=1,
+                            maximum=10,
+                            value=2,
+                            step=1,
+                            label="Max Videos",
+                            info="Maximum number of videos to process",
+                        )
 
-                num_workers = gr.Slider(
-                    minimum=1,
-                    maximum=8,
-                    value=2,
-                    step=1,
-                    label="Concurrent Workers",
-                    info="Number of parallel workers for processing",
-                )
+                        num_workers = gr.Slider(
+                            minimum=1,
+                            maximum=8,
+                            value=2,
+                            step=1,
+                            label="Concurrent Workers",
+                            info="Number of parallel workers for processing",
+                        )
 
-            transcript_language = gr.Dropdown(
-                choices=[
-                    "en",
-                    "es",
-                    "fr",
-                    "de",
-                    "it",
-                    "pt",
-                    "ru",
-                    "ja",
-                    "ko",
-                    "zh",
-                ],
-                value="en",
-                label="Transcript Language",
-                info="Language code for subtitle extraction",
-            )
+                    transcript_language = gr.Dropdown(
+                        choices=[
+                            "en",
+                            "es",
+                            "fr",
+                            "de",
+                            "it",
+                            "pt",
+                            "ru",
+                            "ja",
+                            "ko",
+                            "zh",
+                        ],
+                        value="en",
+                        label="Transcript Language",
+                        info="Language code for subtitle extraction",
+                    )
 
-            gr.HTML('<h3 class="section-header">🔑 API Configuration</h3>')
+                    gr.HTML('<h3 class="section-header">🔑 API Configuration</h3>')
 
-            use_env_keys = gr.Checkbox(
-                value=True,
-                label="Use Environment Variables for API Keys",
-                info="Check if you have OPENAI_API_KEY and YOUTUBE_API_KEY set as environment variables",
-            )
+                    use_env_keys = gr.Checkbox(
+                        value=True,
+                        label="Use Environment Variables for API Keys",
+                        info="Check if you have OPENAI_API_KEY and YOUTUBE_API_KEY set as environment variables",
+                    )
 
-            with gr.Column(visible=False) as api_key_inputs:
-                openai_api_key = gr.Textbox(
-                    label="OpenAI API Key",
-                    type="password",
-                    placeholder="sk-...",
-                    info="Required for transcript summarization",
-                )
+                    with gr.Column(visible=False) as api_key_inputs:
+                        openai_api_key = gr.Textbox(
+                            label="OpenAI API Key",
+                            type="password",
+                            placeholder="sk-...",
+                            info="Required for transcript summarization",
+                        )
 
-                youtube_api_key = gr.Textbox(
-                    label="YouTube Data API Key",
-                    type="password",
-                    placeholder="AIza...",
-                    info="Required for video search",
-                )
+                        youtube_api_key = gr.Textbox(
+                            label="YouTube Data API Key",
+                            type="password",
+                            placeholder="AIza...",
+                            info="Required for video search",
+                        )
 
-            # Show/hide API key inputs based on checkbox
-            def toggle_api_inputs(use_env):
-                return gr.update(visible=not use_env)
+                    # Show/hide API key inputs based on checkbox
+                    def toggle_api_inputs(use_env):
+                        return gr.update(visible=not use_env)
 
-            use_env_keys.change(
-                fn=toggle_api_inputs,
-                inputs=[use_env_keys],
-                outputs=[api_key_inputs],
-            )
+                    use_env_keys.change(
+                        fn=toggle_api_inputs,
+                        inputs=[use_env_keys],
+                        outputs=[api_key_inputs],
+                    )
 
-            process_btn = gr.Button(
-                "🚀 Start Pipeline",
-                variant="primary",
-                size="lg",
-                elem_classes=["primary-button"],
-            )
+                    process_btn = gr.Button(
+                        "🚀 Start Pipeline",
+                        variant="primary",
+                        size="lg",
+                        elem_classes=["primary-button"],
+                    )
 
-        # Pipeline Results - Real-time output blocks in single column
-        gr.HTML(
-            '<h2 style="text-align: center; color: #667eea; margin: 30px 0 20px 0;">📊 Pipeline Results</h2>'
-        )
-
-        # Single column layout
-        search_results = gr.Textbox(
-            label="🔍 1. YouTube Search Results",
-            lines=8,
-            max_lines=15,
-            info="Found videos with details",
-            interactive=False,
-        )
-
-        transcripts_output = gr.Textbox(
-            label="📝 2. Video Transcripts",
-            lines=8,
-            max_lines=15,
-            info="Extracted transcripts with previews",
-            interactive=False,
-            container=True,
-            autoscroll=False,
-            elem_classes=["transcript-container"],
-        )
-
-        summaries_output = gr.Textbox(
-            label="🤖 3. AI Summaries",
-            lines=8,
-            max_lines=15,
-            info="AI-generated summaries and key points",
-            interactive=False,
-        )
-
-        comparison_table = gr.HTML(
-            label="📊 4. Video Comparison Analysis",
-            value="<div style='padding: 20px; text-align: center; color: var(--body-text-color); background-color: var(--background-fill-primary); border: 2px solid var(--border-color-primary); border-radius: 8px; font-weight: bold;'>Comparison table will appear here after all summaries are generated...</div>",
-            visible=True,
-        )
-
-        assignments_output = gr.Textbox(
-            label="📝 5. Educational Assignments",
-            lines=8,
-            max_lines=15,
-            info="AI-generated educational assignments for hands-on learning",
-            interactive=False,
-        )
-
-        # RAG Query Section
-        gr.HTML(
-            '<h2 style="text-align: center; color: #667eea; margin: 30px 0 20px 0;">📚 Academic Papers RAG Query</h2>'
-        )
-
-        with gr.Row():
-            # RAG Query Input
-            with gr.Column(scale=2):
-                rag_query_input = gr.Textbox(
-                    label="🔍 Query Academic Papers",
-                    placeholder="e.g., 'What are the main types of AI agents?', 'How do LLM agents work?', 'What are the challenges in autonomous agents?'",
-                    lines=3,
-                    info="Search through indexed academic papers using natural language queries",
-                )
-
-                rag_query_btn = gr.Button(
-                    "🔍 Search Papers",
-                    variant="secondary",
-                    size="lg",
-                )
-
-            # RAG Instructions
-            with gr.Column(scale=1):
+                # Pipeline Results - Real-time output blocks in single column
                 gr.HTML(
-                    """
-                    <div class="info-box">
-                        <h4 style="margin-bottom: 10px; font-weight: bold;">🎯 RAG Query Features:</h4>
-                        <ul style="margin-bottom: 15px; padding-left: 20px;">
-                            <li style="margin-bottom: 5px;">Search through academic papers using natural language</li>
-                            <li style="margin-bottom: 5px;">Get AI-generated answers with paper citations</li>
-                            <li style="margin-bottom: 5px;">View relevant excerpts from source papers</li>
-                            <li style="margin-bottom: 5px;">See relevance scores for each source</li>
-                        </ul>
-
-                        <h4 style="margin-bottom: 10px; font-weight: bold;">📖 Example Queries:</h4>
-                        <ul style="padding-left: 20px;">
-                            <li style="margin-bottom: 5px;">"What are the main architectures for AI agents?"</li>
-                            <li style="margin-bottom: 5px;">"How do LLM-based agents handle planning?"</li>
-                            <li style="margin-bottom: 5px;">"What evaluation methods exist for autonomous agents?"</li>
-                            <li style="margin-bottom: 5px;">"What are the current limitations of AI agents?"</li>
-                        </ul>
-                    </div>
-                    """
+                    '<h2 style="text-align: center; color: #667eea; margin: 30px 0 20px 0;">📊 Pipeline Results</h2>'
                 )
 
-        # RAG Results
-        rag_results = gr.Textbox(
-            label="📚 Academic Papers Search Results",
-            lines=10,
-            max_lines=20,
-            info="AI-generated answers with paper citations and source excerpts",
-            interactive=False,
-        )
+                # Single column layout
+                search_results = gr.Textbox(
+                    label="🔍 1. YouTube Search Results",
+                    lines=8,
+                    max_lines=15,
+                    info="Found videos with details",
+                    interactive=False,
+                )
 
-        # Sequential pipeline execution using .then() method
-        # Step 1: Search for videos
-        step1_event = process_btn.click(
-            fn=step1_search_videos,
-            inputs=[
-                search_query,
-                max_videos,
-                transcript_language,
-                num_workers,
-                openai_api_key,
-                youtube_api_key,
-                use_env_keys,
-            ],
-            outputs=search_results,
-            show_progress="full",  # Show progress only for this output
-        )
+                transcripts_output = gr.Textbox(
+                    label="📝 2. Video Transcripts",
+                    lines=8,
+                    max_lines=15,
+                    info="Extracted transcripts with previews",
+                    interactive=False,
+                    container=True,
+                    autoscroll=False,
+                    elem_classes=["transcript-container"],
+                )
 
-        # Step 2: Fetch transcripts (triggered after step 1 completes)
-        step2_event = step1_event.then(
-            fn=step2_fetch_transcripts,
-            inputs=search_results,  # Pass the search results as input (for chaining)
-            outputs=transcripts_output,
-            show_progress="full",  # Show progress only for this output
-        )
+                summaries_output = gr.Textbox(
+                    label="🤖 3. AI Summaries",
+                    lines=8,
+                    max_lines=15,
+                    info="AI-generated summaries and key points",
+                    interactive=False,
+                )
 
-        # Step 3: Generate summaries (triggered after step 2 completes)
-        step3_event = step2_event.then(
-            fn=step3_generate_summaries,
-            inputs=transcripts_output,  # Pass the transcript results as input (for chaining)
-            outputs=summaries_output,
-            show_progress="full",  # Show progress only for this output
-        )
+                comparison_table = gr.HTML(
+                    label="📊 4. Video Comparison Analysis",
+                    value="<div style='padding: 20px; text-align: center; color: var(--body-text-color); background-color: var(--background-fill-primary); border: 2px solid var(--border-color-primary); border-radius: 8px; font-weight: bold;'>Comparison table will appear here after all summaries are generated...</div>",
+                    visible=True,
+                )
 
-        # Step 4: Generate comparison table (triggered after step 3 completes)
-        step4_event = step3_event.then(
-            fn=step4_generate_comparison,
-            inputs=summaries_output,  # Pass the summaries results as input (for chaining)
-            outputs=comparison_table,
-            show_progress="full",  # Show progress only for this output
-        )
+                assignments_output = gr.Textbox(
+                    label="📝 5. Educational Assignments",
+                    lines=8,
+                    max_lines=15,
+                    info="AI-generated educational assignments for hands-on learning",
+                    interactive=False,
+                )
 
-        # Step 5: Generate assignments (triggered after step 4 completes)
-        step5_event = step4_event.then(
-            fn=step5_generate_assignments,
-            inputs=comparison_table,  # Pass the comparison results as input (for chaining)
-            outputs=assignments_output,
-            show_progress="full",  # Show progress only for this output
-        )
+                # RAG Query Section
+                gr.HTML(
+                    '<h2 style="text-align: center; color: #667eea; margin: 30px 0 20px 0;">📚 Academic Papers RAG Query</h2>'
+                )
 
-        # RAG Query button click event
-        rag_query_btn.click(
-            fn=query_papers_rag,
-            inputs=rag_query_input,
-            outputs=rag_results,
-            show_progress="full",
-        )
+                with gr.Row():
+                    # RAG Query Input
+                    with gr.Column(scale=2):
+                        rag_query_input = gr.Textbox(
+                            label="🔍 Query Academic Papers",
+                            placeholder="e.g., 'What are the main types of AI agents?', 'How do LLM agents work?', 'What are the challenges in autonomous agents?'",
+                            lines=3,
+                            info="Search through indexed academic papers using natural language queries",
+                        )
+
+                        rag_query_btn = gr.Button(
+                            "🔍 Search Papers",
+                            variant="secondary",
+                            size="lg",
+                        )
+
+                    # RAG Instructions
+                    with gr.Column(scale=1):
+                        gr.HTML(
+                            """
+                            <div class="info-box">
+                                <h4 style="margin-bottom: 10px; font-weight: bold;">🎯 RAG Query Features:</h4>
+                                <ul style="margin-bottom: 15px; padding-left: 20px;">
+                                    <li style="margin-bottom: 5px;">Search through academic papers using natural language</li>
+                                    <li style="margin-bottom: 5px;">Get AI-generated answers with paper citations</li>
+                                    <li style="margin-bottom: 5px;">View relevant excerpts from source papers</li>
+                                    <li style="margin-bottom: 5px;">See relevance scores for each source</li>
+                                </ul>
+
+                                <h4 style="margin-bottom: 10px; font-weight: bold;">📖 Example Queries:</h4>
+                                <ul style="padding-left: 20px;">
+                                    <li style="margin-bottom: 5px;">"What are the main architectures for AI agents?"</li>
+                                    <li style="margin-bottom: 5px;">"How do LLM-based agents handle planning?"</li>
+                                    <li style="margin-bottom: 5px;">"What evaluation methods exist for autonomous agents?"</li>
+                                    <li style="margin-bottom: 5px;">"What are the current limitations of AI agents?"</li>
+                                </ul>
+                            </div>
+                            """
+                        )
+
+                # RAG Results
+                rag_results = gr.Textbox(
+                    label="📚 Academic Papers Search Results",
+                    lines=10,
+                    max_lines=20,
+                    info="AI-generated answers with paper citations and source excerpts",
+                    interactive=False,
+                )
+
+                # Sequential pipeline execution using .then() method
+                # Step 1: Search for videos
+                step1_event = process_btn.click(
+                    fn=step1_search_videos,
+                    inputs=[
+                        search_query,
+                        max_videos,
+                        transcript_language,
+                        num_workers,
+                        openai_api_key,
+                        youtube_api_key,
+                        use_env_keys,
+                    ],
+                    outputs=search_results,
+                    show_progress="full",
+                )
+
+                # Step 2: Fetch transcripts (triggered after step 1 completes)
+                step2_event = step1_event.then(
+                    fn=step2_fetch_transcripts,
+                    inputs=search_results,
+                    outputs=transcripts_output,
+                    show_progress="full",
+                )
+
+                # Step 3: Generate summaries (triggered after step 2 completes)
+                step3_event = step2_event.then(
+                    fn=step3_generate_summaries,
+                    inputs=transcripts_output,
+                    outputs=summaries_output,
+                    show_progress="full",
+                )
+
+                # Step 4: Generate comparison table (triggered after step 3 completes)
+                step4_event = step3_event.then(
+                    fn=step4_generate_comparison,
+                    inputs=summaries_output,
+                    outputs=comparison_table,
+                    show_progress="full",
+                )
+
+                # Step 5: Generate assignments (triggered after step 4 completes)
+                step5_event = step4_event.then(
+                    fn=step5_generate_assignments,
+                    inputs=comparison_table,
+                    outputs=assignments_output,
+                    show_progress="full",
+                )
+
+                # RAG Query button click event
+                rag_query_btn.click(
+                    fn=query_papers_rag,
+                    inputs=rag_query_input,
+                    outputs=rag_results,
+                    show_progress="full",
+                )
+
+            # ==================== History Tab ====================
+            with gr.TabItem("📜 History", id="history_tab"):
+                gr.HTML('<h2 style="text-align: center; color: #667eea; margin: 20px 0;">📜 Pipeline Run History</h2>')
+
+                with gr.Row():
+                    # Left Panel - History List
+                    with gr.Column(scale=1, elem_classes=["history-list-panel"]):
+                        with gr.Row():
+                            history_status_filter = gr.Dropdown(
+                                choices=["All", "Success", "Failed", "Partial", "Running"],
+                                value="All",
+                                label="Filter by Status",
+                                scale=2,
+                            )
+                            history_refresh_btn = gr.Button("🔄 Refresh", scale=1)
+
+                        history_table = gr.Dataframe(
+                            headers=["ID", "Query", "Date", "Status", "Videos", "Transcripts", "Summaries", "Duration", "Full ID"],
+                            datatype=["str", "str", "str", "str", "number", "number", "number", "str", "str"],
+                            column_count=(9, "fixed"),
+                            row_count=(10, "dynamic"),
+                            interactive=False,
+                            label="Pipeline Runs",
+                            wrap=True,
+                        )
+
+                        with gr.Row():
+                            history_prev_btn = gr.Button("◀ Previous", scale=1)
+                            history_page_info = gr.Textbox(
+                                value="Page 1",
+                                label="",
+                                interactive=False,
+                                scale=1,
+                            )
+                            history_next_btn = gr.Button("Next ▶", scale=1)
+
+                        history_status_msg = gr.Textbox(
+                            label="Status",
+                            interactive=False,
+                            lines=1,
+                        )
+
+                    # Right Panel - Run Details
+                    with gr.Column(scale=1, elem_classes=["history-detail-panel"]):
+                        run_details_html = gr.HTML(
+                            value="<div style='padding: 40px; text-align: center; color: var(--body-text-color-subdued);'>Select a run from the list to view details</div>",
+                            label="Run Details",
+                        )
+
+                        with gr.Row():
+                            rerun_btn = gr.Button("🔄 Re-run Pipeline", variant="primary", scale=1)
+                            delete_btn = gr.Button("🗑️ Delete Run", variant="stop", scale=1)
+
+                        with gr.Row():
+                            delete_files_checkbox = gr.Checkbox(
+                                value=False,
+                                label="Also delete output files",
+                                info="Check to delete the output folder along with the database record",
+                            )
+
+                        delete_result_msg = gr.Textbox(
+                            label="Action Result",
+                            interactive=False,
+                            lines=1,
+                            visible=True,
+                        )
+
+                # Hidden state for tracking
+                selected_run_id = gr.State(value="")
+                current_page = gr.State(value=1)
+                total_pages = gr.State(value=1)
+
+                # History event handlers
+                def on_history_refresh(status_filter):
+                    data, pages, status = load_history_list(status_filter, page=1)
+                    return data, 1, pages, status, "Page 1 of " + str(pages)
+
+                def on_page_change(direction, current, total, status_filter):
+                    new_page = current + direction
+                    if new_page < 1:
+                        new_page = 1
+                    elif new_page > total:
+                        new_page = total
+                    data, pages, status = load_history_list(status_filter, page=new_page)
+                    return data, new_page, pages, status, f"Page {new_page} of {pages}"
+
+                def on_row_select(evt: gr.SelectData, dataframe_data):
+                    if evt.index is not None and len(dataframe_data) > evt.index[0]:
+                        row = dataframe_data.iloc[evt.index[0]]  # Use .iloc for row access by index
+                        full_run_id = row.iloc[8]  # Full ID is in the 9th column (index 8)
+                        details = load_run_details(full_run_id)
+                        return full_run_id, details
+                    return "", "<div style='padding: 20px; text-align: center;'>Select a run to view details</div>"
+
+                def on_delete(run_id, delete_files, status_filter):
+                    if not run_id:
+                        return "No run selected", gr.update(), ""
+                    msg, new_data, _ = delete_run_handler(run_id, delete_files)
+                    if new_data:
+                        return msg, new_data, ""
+                    # Refresh on failure too
+                    data, _, status = load_history_list(status_filter)
+                    return msg, data, ""
+
+                def on_rerun(run_id):
+                    if not run_id:
+                        return gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), 0
+                    query, max_v, lang, workers, use_env = rerun_pipeline_handler(run_id)
+                    # Return values to update Pipeline tab inputs and switch to Pipeline tab
+                    return query, max_v, lang, workers, use_env, 0
+
+                # Connect history event handlers
+                history_refresh_btn.click(
+                    fn=on_history_refresh,
+                    inputs=[history_status_filter],
+                    outputs=[history_table, current_page, total_pages, history_status_msg, history_page_info],
+                )
+
+                history_status_filter.change(
+                    fn=on_history_refresh,
+                    inputs=[history_status_filter],
+                    outputs=[history_table, current_page, total_pages, history_status_msg, history_page_info],
+                )
+
+                history_prev_btn.click(
+                    fn=lambda c, t, s: on_page_change(-1, c, t, s),
+                    inputs=[current_page, total_pages, history_status_filter],
+                    outputs=[history_table, current_page, total_pages, history_status_msg, history_page_info],
+                )
+
+                history_next_btn.click(
+                    fn=lambda c, t, s: on_page_change(1, c, t, s),
+                    inputs=[current_page, total_pages, history_status_filter],
+                    outputs=[history_table, current_page, total_pages, history_status_msg, history_page_info],
+                )
+
+                history_table.select(
+                    fn=on_row_select,
+                    inputs=[history_table],
+                    outputs=[selected_run_id, run_details_html],
+                )
+
+                delete_btn.click(
+                    fn=on_delete,
+                    inputs=[selected_run_id, delete_files_checkbox, history_status_filter],
+                    outputs=[delete_result_msg, history_table, selected_run_id],
+                )
+
+                rerun_btn.click(
+                    fn=on_rerun,
+                    inputs=[selected_run_id],
+                    outputs=[search_query, max_videos, transcript_language, num_workers, use_env_keys, main_tabs],
+                )
 
     return app, css
 

@@ -1,0 +1,72 @@
+version: "3.8"
+
+# Portainer Stack for Atlas - YouTube Research Pipeline
+# Deploy via Portainer > Stacks > Add Stack > Upload or paste this file
+# Set environment variables in Portainer's "Environment variables" section
+#
+# Image will be: ghcr.io/<github-username>/atlas:latest
+# Replace GITHUB_USER with your GitHub username
+
+services:
+  atlas:
+    image: ghcr.io/sudipta26889/atlas:${TAG:-latest}
+    environment:
+      # API Keys (set these in Portainer environment variables)
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - YOUTUBE_API_KEY=${YOUTUBE_API_KEY}
+      # MySQL Configuration
+      - MYSQL_HOST=${MYSQL_HOST}
+      - MYSQL_PORT=${MYSQL_PORT:-3306}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - MYSQL_DATABASE=${MYSQL_DATABASE:-atlas_db}
+      # Gradio Configuration
+      - GRADIO_SERVER_NAME=0.0.0.0
+      - GRADIO_ANALYTICS_ENABLED=False
+    ports:
+      - "${ATLAS_PORT:-7860}:7860"
+    volumes:
+      - atlas_output:/app/output
+    networks:
+      - atlas_net
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == worker
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: start-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4G
+        reservations:
+          cpus: "0.5"
+          memory: 1G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+volumes:
+  atlas_output:
+    driver: local
+
+networks:
+  atlas_net:
+    driver: overlay
+    attachable: true

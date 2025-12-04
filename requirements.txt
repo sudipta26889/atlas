@@ -10,3 +10,4 @@ gradio>=6.0.0
 huggingface-hub>=1.0.0
 yt-dlp==2025.11.12
 pyyaml==6.0.3
+pymysql==1.1.0
