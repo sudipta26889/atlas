@@ -48,7 +48,7 @@ class YouTubeTranscriptFetcher:
         Returns:
             dict: Configuration options for yt-dlp.
         """
-        return {
+        opts = {
             "skip_download": get_config("download.skip_download", True),
             "writesubtitles": get_config(
                 "download.write_subtitles", True
@@ -70,6 +70,20 @@ class YouTubeTranscriptFetcher:
             "quiet": False,
             "no_warnings": False,
         }
+
+        # Check for cookies file to bypass bot detection
+        cookies_paths = [
+            "/app/cookies.txt",  # Docker mount path
+            os.path.join(os.path.dirname(__file__), "..", "cookies.txt"),  # Project root
+            os.path.expanduser("~/cookies.txt"),  # Home directory
+        ]
+        for cookies_path in cookies_paths:
+            if os.path.exists(cookies_path):
+                opts["cookiefile"] = cookies_path
+                print(f"[YT-DLP] Using cookies from: {cookies_path}")
+                break
+
+        return opts
 
     def fetch_transcript(self, url: str) -> bool:
         """Fetch transcript for a single YouTube video.
