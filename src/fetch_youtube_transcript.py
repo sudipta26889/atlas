@@ -62,6 +62,13 @@ class YouTubeTranscriptFetcher:
                 self.output_folder,
                 get_config("download.output_template", "%(id)s.%(ext)s"),
             ),
+            # Increase timeouts for slow YouTube responses
+            "socket_timeout": 120,
+            "retries": 3,
+            # Use alternative player clients to avoid JS challenge
+            "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
+            "quiet": False,
+            "no_warnings": False,
         }
 
     def fetch_transcript(self, url: str) -> bool:
