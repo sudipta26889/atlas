@@ -64,11 +64,14 @@ class YouTubeTranscriptFetcher:
             ),
             # Increase timeouts for slow YouTube responses
             "socket_timeout": 120,
-            "retries": 3,
-            # Use alternative player clients to avoid JS challenge
-            "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
+            "retries": 5,
+            # Use web_creator client which has better success rate for subtitles
+            "extractor_args": {"youtube": {"player_client": ["web_creator", "mweb", "web"]}},
             "quiet": False,
             "no_warnings": False,
+            # Additional options to help bypass detection
+            "geo_bypass": True,
+            "nocheckcertificate": True,
         }
 
         # Check for cookies file to bypass bot detection
