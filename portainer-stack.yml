@@ -20,6 +20,12 @@ services:
       - MYSQL_USER=${MYSQL_USER}
       - MYSQL_PASSWORD=${MYSQL_PASSWORD}
       - MYSQL_DATABASE=${MYSQL_DATABASE:-atlas_db}
+      # Google OAuth Configuration (optional - app works without auth if not set)
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - APP_URL=${APP_URL:-http://localhost:7860}
+      # History Tab Access Control (comma-separated emails, empty = allow all)
+      - ALLOWED_HISTORY_EMAILS=${ALLOWED_HISTORY_EMAILS:-}
       # Gradio Configuration
       - GRADIO_SERVER_NAME=0.0.0.0
       - GRADIO_ANALYTICS_ENABLED=False

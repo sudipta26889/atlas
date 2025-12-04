@@ -66,7 +66,7 @@ class PipelineHistoryDB:
 
     def _ensure_tables_exist(self) -> None:
         """Create tables if they don't exist."""
-        create_table_sql = """
+        create_pipeline_runs_sql = """
         CREATE TABLE IF NOT EXISTS pipeline_runs (
             id INT AUTO_INCREMENT PRIMARY KEY,
             run_id VARCHAR(64) NOT NULL UNIQUE,
@@ -80,23 +80,46 @@ class PipelineHistoryDB:
             duration_seconds FLOAT DEFAULT NULL,
             error_message TEXT DEFAULT NULL,
             config_json TEXT DEFAULT NULL,
+            user_email VARCHAR(255) DEFAULT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             INDEX idx_timestamp (timestamp DESC),
             INDEX idx_status (status),
-            INDEX idx_search_query (search_query(255))
+            INDEX idx_search_query (search_query(255)),
+            INDEX idx_user_email (user_email)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """
+
+        create_user_logs_sql = """
+        CREATE TABLE IF NOT EXISTS user_activity_logs (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            user_email VARCHAR(255) NOT NULL,
+            user_name VARCHAR(255) DEFAULT NULL,
+            action VARCHAR(100) NOT NULL,
+            details TEXT DEFAULT NULL,
+            ip_address VARCHAR(45) DEFAULT NULL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_user_email (user_email),
+            INDEX idx_action (action),
+            INDEX idx_timestamp (timestamp DESC)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """
+
         try:
             with self.get_connection() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute(create_table_sql)
+                    cursor.execute(create_pipeline_runs_sql)
+                    cursor.execute(create_user_logs_sql)
         except Exception as e:
             print(f"[DB] Error creating tables: {e}")
             raise
 
     def create_run(
-        self, search_query: str, output_folder_path: str, config: Dict
+        self,
+        search_query: str,
+        output_folder_path: str,
+        config: Dict,
+        user_email: Optional[str] = None,
     ) -> str:
         """
         Create a new pipeline run record.
@@ -105,6 +128,7 @@ class PipelineHistoryDB:
             search_query: The search query used
             output_folder_path: Path to the output folder
             config: Configuration dict with max_videos, language, workers, etc.
+            user_email: Email of the user who initiated the run
 
         Returns:
             run_id: Unique identifier for this run
@@ -114,17 +138,17 @@ class PipelineHistoryDB:
 
         sql = """
         INSERT INTO pipeline_runs
-        (run_id, search_query, output_folder_path, config_json, status)
-        VALUES (%s, %s, %s, %s, 'running')
+        (run_id, search_query, output_folder_path, config_json, status, user_email)
+        VALUES (%s, %s, %s, %s, 'running', %s)
         """
 
         try:
             with self.get_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute(
-                        sql, (run_id, search_query, output_folder_path, config_json)
+                        sql, (run_id, search_query, output_folder_path, config_json, user_email)
                     )
-            print(f"[DB] Created run: {run_id}")
+            print(f"[DB] Created run: {run_id} by {user_email or 'unknown'}")
             return run_id
         except Exception as e:
             print(f"[DB] Error creating run: {e}")
@@ -322,6 +346,121 @@ class PipelineHistoryDB:
                     return result["count"] if result else 0
         except Exception as e:
             print(f"[DB] Error getting run count: {e}")
+            return 0
+
+    # ==================== User Activity Logging ====================
+
+    def log_user_action(
+        self,
+        user_email: str,
+        action: str,
+        details: Optional[str] = None,
+        user_name: Optional[str] = None,
+        ip_address: Optional[str] = None,
+    ) -> bool:
+        """
+        Log a user action.
+
+        Args:
+            user_email: User's email address
+            action: Action type (e.g., 'login', 'search', 'view_history', 'delete_run')
+            details: Additional details about the action
+            user_name: User's display name
+            ip_address: User's IP address
+
+        Returns:
+            bool: True if logging was successful
+        """
+        sql = """
+        INSERT INTO user_activity_logs
+        (user_email, user_name, action, details, ip_address)
+        VALUES (%s, %s, %s, %s, %s)
+        """
+
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(sql, (user_email, user_name, action, details, ip_address))
+            print(f"[DB] Logged action: {action} by {user_email}")
+            return True
+        except Exception as e:
+            print(f"[DB] Error logging user action: {e}")
+            return False
+
+    def get_user_logs(
+        self,
+        user_email: Optional[str] = None,
+        action: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict]:
+        """
+        Get user activity logs with optional filters.
+
+        Args:
+            user_email: Filter by user email (optional)
+            action: Filter by action type (optional)
+            limit: Maximum number of logs to return
+            offset: Number of logs to skip
+
+        Returns:
+            List of log dictionaries
+        """
+        conditions = []
+        params = []
+
+        if user_email:
+            conditions.append("user_email = %s")
+            params.append(user_email)
+        if action:
+            conditions.append("action = %s")
+            params.append(action)
+
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+        sql = f"""
+        SELECT * FROM user_activity_logs
+        {where_clause}
+        ORDER BY timestamp DESC
+        LIMIT %s OFFSET %s
+        """
+        params.extend([limit, offset])
+
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(sql, params)
+                    return cursor.fetchall()
+        except Exception as e:
+            print(f"[DB] Error getting user logs: {e}")
+            return []
+
+    def get_user_log_count(
+        self, user_email: Optional[str] = None, action: Optional[str] = None
+    ) -> int:
+        """Get total count of user logs with optional filters."""
+        conditions = []
+        params = []
+
+        if user_email:
+            conditions.append("user_email = %s")
+            params.append(user_email)
+        if action:
+            conditions.append("action = %s")
+            params.append(action)
+
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+        sql = f"SELECT COUNT(*) as count FROM user_activity_logs {where_clause}"
+
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(sql, params)
+                    result = cursor.fetchone()
+                    return result["count"] if result else 0
+        except Exception as e:
+            print(f"[DB] Error getting user log count: {e}")
             return 0
 
 

@@ -116,6 +116,7 @@ def step1_search_videos(
     openai_api_key: str,
     youtube_api_key: str,
     use_env_keys: bool,
+    request: gr.Request = None,
     progress: gr.Progress = gr.Progress(),
 ) -> str:
     """
@@ -125,6 +126,19 @@ def step1_search_videos(
         str: Formatted search results
     """
     try:
+        # Get user info for logging
+        user_email = None
+        user_name = None
+        if request:
+            try:
+                import gradiologin as gl
+                user = gl.get_user(request)
+                if user:
+                    user_email = user.get("email", user.get("preferred_username"))
+                    user_name = user.get("name")
+            except Exception:
+                pass
+
         # Reset pipeline state
         global pipeline_state
         pipeline_state = {
@@ -140,6 +154,8 @@ def step1_search_videos(
             "run_id": None,
             "db": None,
             "start_time": time.time(),
+            "user_email": user_email,
+            "user_name": user_name,
         }
 
         # Validate inputs
@@ -198,10 +214,19 @@ def step1_search_videos(
                         "num_workers": num_workers,
                         "use_env_keys": use_env_keys,
                     },
+                    user_email=user_email,
                 )
                 pipeline_state["db"] = db
                 pipeline_state["run_id"] = run_id
                 db.update_run_progress(run_id=run_id, video_count=len(videos))
+
+                # Log the search action
+                db.log_user_action(
+                    user_email=user_email or "anonymous",
+                    action="pipeline_search",
+                    details=f"Search: {search_query}, Videos: {len(videos)}",
+                    user_name=user_name,
+                )
         except Exception as db_error:
             print(f"[DB] Warning: Failed to initialize history tracking: {db_error}")
 
@@ -2030,7 +2055,25 @@ def create_gradio_app():
                 total_pages = gr.State(value=1)
 
                 # History event handlers
-                def on_history_refresh(status_filter):
+                def on_history_refresh(status_filter, request: gr.Request = None):
+                    # Check access
+                    allowed_emails = os.getenv("ALLOWED_HISTORY_EMAILS", "").split(",")
+                    allowed_emails = [e.strip().lower() for e in allowed_emails if e.strip()]
+
+                    if allowed_emails:
+                        user_email = "anonymous"
+                        if request:
+                            try:
+                                import gradiologin as gl
+                                user = gl.get_user(request)
+                                if user:
+                                    user_email = user.get("email", "").lower()
+                            except Exception:
+                                pass
+
+                        if user_email not in allowed_emails:
+                            return [], 1, 1, f"🔒 Access denied for {user_email}", "Access Denied"
+
                     data, pages, status = load_history_list(status_filter, page=1)
                     return data, 1, pages, status, "Page 1 of " + str(pages)
 
@@ -2114,68 +2157,149 @@ def create_gradio_app():
     return app, css
 
 
+# ==================== OAuth Helper Functions ====================
+
+def get_current_user(request: gr.Request) -> Optional[Dict]:
+    """Get current logged in user from gradiologin session."""
+    try:
+        import gradiologin as gl
+        user = gl.get_user(request)
+        return user if user else None
+    except Exception:
+        return None
+
+
+def get_user_email(request: gr.Request) -> str:
+    """Get current user's email or 'anonymous'."""
+    user = get_current_user(request)
+    if user:
+        return user.get("email", user.get("preferred_username", "unknown"))
+    return "anonymous"
+
+
+def get_user_name(request: gr.Request) -> str:
+    """Get current user's display name."""
+    user = get_current_user(request)
+    if user:
+        return user.get("name", user.get("preferred_username", "User"))
+    return "Guest"
+
+
+def is_history_allowed(request: gr.Request) -> bool:
+    """Check if user is allowed to access History tab."""
+    allowed_emails = os.getenv("ALLOWED_HISTORY_EMAILS", "").split(",")
+    allowed_emails = [e.strip().lower() for e in allowed_emails if e.strip()]
+
+    # If no allowed emails configured, allow all authenticated users
+    if not allowed_emails:
+        return True
+
+    user_email = get_user_email(request).lower()
+    return user_email in allowed_emails
+
+
+def log_action(request: gr.Request, action: str, details: str = None):
+    """Log user action to database."""
+    try:
+        from src.database import get_db_or_none
+        db = get_db_or_none()
+        if db:
+            user = get_current_user(request)
+            email = user.get("email", "unknown") if user else "anonymous"
+            name = user.get("name") if user else None
+            ip = request.client.host if hasattr(request, 'client') and request.client else None
+            db.log_user_action(
+                user_email=email,
+                action=action,
+                details=details,
+                user_name=name,
+                ip_address=ip
+            )
+    except Exception as e:
+        print(f"[LOG] Failed to log action: {e}")
+
+
+# ==================== Main Entry Point ====================
+
 if __name__ == "__main__":
-    # Check for cloud environment
-    is_cloud = is_cloud_environment()
+    # Check if OAuth is enabled
+    google_client_id = os.getenv("GOOGLE_CLIENT_ID")
+    google_client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+    oauth_enabled = bool(google_client_id and google_client_secret)
 
-    if is_cloud:
-        print("☁️  Detected cloud environment")
-        print("📋 Using default configuration for cloud deployment...")
+    # Parse arguments
+    parser = argparse.ArgumentParser(
+        description="Atlas - AI-Powered Content Analysis Platform"
+    )
+    parser.add_argument(
+        "--host", type=str, default="0.0.0.0", help="Host to run the server on"
+    )
+    parser.add_argument(
+        "--port", type=int, default=7860, help="Port to run the server on"
+    )
+    parser.add_argument("--share", action="store_true", help="Create a public link")
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode")
 
-        # Use default values for cloud environments
-        class DefaultArgs:
-            def __init__(self):
-                self.host = "0.0.0.0"
-                self.port = 7860
-                self.share = True
-                self.debug = False
-
-        args = DefaultArgs()
-
-    else:
-        print("💻 Detected local environment")
-        print("📋 Using command line arguments...")
-
-        # Parse command line arguments for local development
-        parser = argparse.ArgumentParser(
-            description="Atlas - AI-Powered Content Analysis Platform"
-        )
-        parser.add_argument(
-            "--host", type=str, default="127.0.0.1", help="Host to run the server on"
-        )
-        parser.add_argument(
-            "--port", type=int, default=7860, help="Port to run the server on"
-        )
-        parser.add_argument("--share", action="store_true", help="Create a public link")
-        parser.add_argument("--debug", action="store_true", help="Enable debug mode")
-
-        args = parser.parse_args()
+    args = parser.parse_args()
 
     print("🔧 Configuration:")
     print(f"   Host: {args.host}")
     print(f"   Port: {args.port}")
-    print(f"   Share: {args.share}")
-    print(f"   Debug: {args.debug}")
+    print(f"   OAuth Enabled: {oauth_enabled}")
 
-    print("🚀 Launching Gradio interface...")
+    if oauth_enabled:
+        print("🔐 Starting with Google OAuth authentication...")
 
-    app, css = create_gradio_app()
-    app.launch(
-        share=args.share,
-        server_name=args.host,
-        server_port=args.port,
-        show_error=args.debug,
-        css=css,
-        theme="soft",
-    )
+        from fastapi import FastAPI
+        import gradiologin as gl
+        import uvicorn
 
-    if not is_cloud:
-        print("\nExample usage:")
-        print("  # Launch with default settings")
-        print("  python app_youtube.py")
-        print("  # Launch with public sharing")
-        print("  python app_youtube.py --share")
-        print("  # Launch on custom port")
-        print("  python app_youtube.py --port 8080")
+        # Create FastAPI app
+        fastapi_app = FastAPI(title="Atlas")
+
+        # Register Google OAuth provider
+        gl.register(
+            name="google",
+            icon="google",
+            server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
+            client_id=google_client_id,
+            client_secret=google_client_secret,
+            client_kwargs={"scope": "openid email profile"},
+        )
+
+        # Create Gradio app
+        gradio_app, css = create_gradio_app()
+
+        # Mount Gradio with OAuth protection
+        app_url = os.getenv("APP_URL", f"http://localhost:{args.port}")
+        gl.mount_gradio_app(
+            fastapi_app,
+            gradio_app,
+            "/app",
+            app_url=app_url,
+        )
+
+        # Redirect root to app
+        @fastapi_app.get("/")
+        async def root():
+            from fastapi.responses import RedirectResponse
+            return RedirectResponse(url="/app")
+
+        print(f"🚀 Launching Atlas with OAuth at http://{args.host}:{args.port}")
+        print(f"   Login page: http://{args.host}:{args.port}/login")
+        print(f"   App: http://{args.host}:{args.port}/app")
+
+        uvicorn.run(fastapi_app, host=args.host, port=args.port)
+
     else:
-        print("\n☁️  Running in cloud environment - configuration is automatic!")
+        print("⚠️  OAuth not configured - running without authentication")
+        print("   Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to enable OAuth")
+        print("🚀 Launching Gradio interface...")
+
+        app, css = create_gradio_app()
+        app.launch(
+            share=args.share,
+            server_name=args.host,
+            server_port=args.port,
+            show_error=args.debug,
+        )
