@@ -159,7 +159,7 @@ def step1_search_videos(
         pipeline = YouTubePipeline(
             max_videos=max_videos,
             transcript_language=transcript_language,
-            output_folder=f"pipeline_output_{int(time.time())}",
+            output_folder=f"output/pipeline_output_{int(time.time())}",
             num_workers=num_workers,
         )
 
@@ -1152,59 +1152,69 @@ def format_search_results(videos: List[Dict]) -> str:
 def create_gradio_app():
     """Create and configure the Gradio application."""
 
-    # Custom CSS for professional styling
+    # Theme-aware CSS using Gradio CSS variables
     css = """
+    /* Theme-aware container styling */
     .gradio-container {
         max-width: 100% !important;
         width: 100% !important;
         margin: 0 !important;
         padding: 20px !important;
-        background: #f8f9fa;
     }
-    
-    /* Header styling */
+
+    /* Header styling - works in both light and dark mode */
     .header-section {
         text-align: center;
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
+        color: white !important;
         padding: 30px;
         border-radius: 15px;
         margin-bottom: 30px;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        box-shadow: 0 4px 15px rgba(0,0,0,0.2);
     }
-    
+
     .header-section h1 {
         font-size: 2.5em;
         margin-bottom: 15px;
         text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        color: white !important;
     }
-    
+
     .header-section p {
         font-size: 1.2em;
         margin-bottom: 10px;
         opacity: 0.95;
+        color: white !important;
     }
-    
-    /* Input section styling */
+
+    .header-section div {
+        color: white !important;
+    }
+
+    .header-section strong {
+        color: white !important;
+    }
+
+    /* Input section styling - theme aware */
     .input-section {
-        background: #ffffff;
+        background: var(--background-fill-primary);
         padding: 25px;
         border-radius: 12px;
         margin-bottom: 20px;
         box-shadow: 0 2px 10px rgba(0,0,0,0.08);
-        border: 1px solid #e0e0e0;
+        border: 1px solid var(--border-color-primary);
     }
-    
-    /* Results section styling */
+
+    /* Results section styling - theme aware */
     .results-section {
-        background: #ffffff;
+        background: var(--background-fill-primary);
         padding: 25px;
         border-radius: 12px;
-        border: 1px solid #e0e0e0;
+        border: 1px solid var(--border-color-primary);
         box-shadow: 0 2px 10px rgba(0,0,0,0.08);
     }
-    
-    /* Section headers */
+
+    /* Section headers - theme aware */
     .section-header {
         color: #667eea;
         font-weight: bold;
@@ -1212,7 +1222,7 @@ def create_gradio_app():
         padding-bottom: 5px;
         margin-bottom: 15px;
     }
-    
+
     /* Button styling */
     .primary-button {
         width: 100%;
@@ -1222,32 +1232,27 @@ def create_gradio_app():
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
         border: none !important;
         box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4) !important;
+        color: white !important;
     }
-    
+
     .primary-button:hover {
         transform: translateY(-2px);
         box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6) !important;
     }
-    
-    /* API key styling */
-    .api-key-input {
-        border: 2px solid #fbbf24 !important;
-        background: #fffbeb !important;
-    }
-    
-    /* Step boxes */
+
+    /* Step boxes - theme aware */
     .step-box {
-        background: #ffffff;
-        border: 2px solid #e5e7eb;
+        background: var(--background-fill-primary);
+        border: 2px solid var(--border-color-primary);
         border-radius: 10px;
         padding: 20px;
         margin: 10px 0;
     }
-    
+
     .search-step { border-left: 4px solid #10b981; }
     .transcript-step { border-left: 4px solid #3b82f6; }
     .summary-step { border-left: 4px solid #8b5cf6; }
-    
+
     /* Transcript text formatting for full width */
     .transcript-container textarea {
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
@@ -1257,20 +1262,33 @@ def create_gradio_app():
         text-align: justify !important;
         width: 100% !important;
     }
-    
+
     /* Ensure textboxes use full width */
     .gradio-textbox {
         width: 100% !important;
     }
-    
+
     .gradio-textbox textarea {
         width: 100% !important;
         max-width: 100% !important;
         box-sizing: border-box !important;
     }
+
+    /* Theme-aware info boxes */
+    .info-box {
+        background: var(--background-fill-secondary);
+        color: var(--body-text-color);
+        padding: 15px;
+        border-radius: 8px;
+        border: 1px solid var(--border-color-primary);
+    }
+
+    .info-box h4, .info-box li, .info-box ul {
+        color: var(--body-text-color) !important;
+    }
     """
 
-    with gr.Blocks(css=css, title="🎬 Atlas") as app:
+    with gr.Blocks(title="🎬 Atlas") as app:
         # Header Section
         with gr.Row():
             with gr.Column(elem_classes=["header-section"]):
@@ -1389,7 +1407,6 @@ def create_gradio_app():
             label="🔍 1. YouTube Search Results",
             lines=8,
             max_lines=15,
-            show_copy_button=True,
             info="Found videos with details",
             interactive=False,
         )
@@ -1398,7 +1415,6 @@ def create_gradio_app():
             label="📝 2. Video Transcripts",
             lines=8,
             max_lines=15,
-            show_copy_button=True,
             info="Extracted transcripts with previews",
             interactive=False,
             container=True,
@@ -1410,14 +1426,13 @@ def create_gradio_app():
             label="🤖 3. AI Summaries",
             lines=8,
             max_lines=15,
-            show_copy_button=True,
             info="AI-generated summaries and key points",
             interactive=False,
         )
 
         comparison_table = gr.HTML(
             label="📊 4. Video Comparison Analysis",
-            value="<div style='padding: 20px; text-align: center; color: #000000; background-color: #ffffff; border: 2px solid #333333; border-radius: 8px; font-weight: bold;'>Comparison table will appear here after all summaries are generated...</div>",
+            value="<div style='padding: 20px; text-align: center; color: var(--body-text-color); background-color: var(--background-fill-primary); border: 2px solid var(--border-color-primary); border-radius: 8px; font-weight: bold;'>Comparison table will appear here after all summaries are generated...</div>",
             visible=True,
         )
 
@@ -1425,7 +1440,6 @@ def create_gradio_app():
             label="📝 5. Educational Assignments",
             lines=8,
             max_lines=15,
-            show_copy_button=True,
             info="AI-generated educational assignments for hands-on learning",
             interactive=False,
         )
@@ -1455,21 +1469,21 @@ def create_gradio_app():
             with gr.Column(scale=1):
                 gr.HTML(
                     """
-                    <div style="color: #000000 !important; background-color: #ffffff; padding: 15px; border-radius: 8px; border: 1px solid #e0e0e0;">
-                        <h4 style="color: #000000 !important; margin-bottom: 10px; font-weight: bold;">🎯 RAG Query Features:</h4>
-                        <ul style="color: #000000 !important; margin-bottom: 15px; padding-left: 20px;">
-                            <li style="color: #000000 !important; margin-bottom: 5px;">Search through academic papers using natural language</li>
-                            <li style="color: #000000 !important; margin-bottom: 5px;">Get AI-generated answers with paper citations</li>
-                            <li style="color: #000000 !important; margin-bottom: 5px;">View relevant excerpts from source papers</li>
-                            <li style="color: #000000 !important; margin-bottom: 5px;">See relevance scores for each source</li>
+                    <div class="info-box">
+                        <h4 style="margin-bottom: 10px; font-weight: bold;">🎯 RAG Query Features:</h4>
+                        <ul style="margin-bottom: 15px; padding-left: 20px;">
+                            <li style="margin-bottom: 5px;">Search through academic papers using natural language</li>
+                            <li style="margin-bottom: 5px;">Get AI-generated answers with paper citations</li>
+                            <li style="margin-bottom: 5px;">View relevant excerpts from source papers</li>
+                            <li style="margin-bottom: 5px;">See relevance scores for each source</li>
                         </ul>
-                        
-                        <h4 style="color: #000000 !important; margin-bottom: 10px; font-weight: bold;">📖 Example Queries:</h4>
-                        <ul style="color: #000000 !important; padding-left: 20px;">
-                            <li style="color: #000000 !important; margin-bottom: 5px;">"What are the main architectures for AI agents?"</li>
-                            <li style="color: #000000 !important; margin-bottom: 5px;">"How do LLM-based agents handle planning?"</li>
-                            <li style="color: #000000 !important; margin-bottom: 5px;">"What evaluation methods exist for autonomous agents?"</li>
-                            <li style="color: #000000 !important; margin-bottom: 5px;">"What are the current limitations of AI agents?"</li>
+
+                        <h4 style="margin-bottom: 10px; font-weight: bold;">📖 Example Queries:</h4>
+                        <ul style="padding-left: 20px;">
+                            <li style="margin-bottom: 5px;">"What are the main architectures for AI agents?"</li>
+                            <li style="margin-bottom: 5px;">"How do LLM-based agents handle planning?"</li>
+                            <li style="margin-bottom: 5px;">"What evaluation methods exist for autonomous agents?"</li>
+                            <li style="margin-bottom: 5px;">"What are the current limitations of AI agents?"</li>
                         </ul>
                     </div>
                     """
@@ -1480,7 +1494,6 @@ def create_gradio_app():
             label="📚 Academic Papers Search Results",
             lines=10,
             max_lines=20,
-            show_copy_button=True,
             info="AI-generated answers with paper citations and source excerpts",
             interactive=False,
         )
@@ -1542,7 +1555,7 @@ def create_gradio_app():
             show_progress="full",
         )
 
-    return app
+    return app, css
 
 
 if __name__ == "__main__":
@@ -1558,7 +1571,7 @@ if __name__ == "__main__":
             def __init__(self):
                 self.host = "0.0.0.0"
                 self.port = 7860
-                self.share = False
+                self.share = True
                 self.debug = False
 
         args = DefaultArgs()
@@ -1590,12 +1603,14 @@ if __name__ == "__main__":
 
     print("🚀 Launching Gradio interface...")
 
-    app = create_gradio_app()
+    app, css = create_gradio_app()
     app.launch(
         share=args.share,
         server_name=args.host,
         server_port=args.port,
         show_error=args.debug,
+        css=css,
+        theme="soft",
     )
 
     if not is_cloud:
