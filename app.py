@@ -1786,15 +1786,7 @@ def create_gradio_app():
 
                     gr.HTML('<h3 class="section-header">🔑 API Configuration</h3>')
 
-                    # Container for env keys option (only visible to allowed users)
-                    with gr.Column(visible=True) as env_keys_container:
-                        use_env_keys = gr.Checkbox(
-                            value=True,
-                            label="Use Environment Variables for API Keys",
-                            info="Check if you have OPENAI_API_KEY and YOUTUBE_API_KEY set as environment variables",
-                        )
-
-                    # BYOK notice for non-allowed users
+                    # BYOK notice for non-allowed users (visible by default)
                     byok_notice = gr.HTML(
                         value="""
                         <div style='padding: 12px; background: linear-gradient(135deg, #667eea22, #764ba222);
@@ -1805,10 +1797,18 @@ def create_gradio_app():
                             </p>
                         </div>
                         """,
-                        visible=False,
+                        visible=True,
                     )
 
-                    with gr.Column(visible=False) as api_key_inputs:
+                    # Container for env keys option (hidden by default, only shown to allowed users)
+                    with gr.Column(visible=False) as env_keys_container:
+                        use_env_keys = gr.Checkbox(
+                            value=False,
+                            label="Use Environment Variables for API Keys",
+                            info="Check if you have OPENAI_API_KEY and YOUTUBE_API_KEY set as environment variables",
+                        )
+
+                    with gr.Column(visible=True) as api_key_inputs:
                         openai_api_key = gr.Textbox(
                             label="OpenAI API Key",
                             type="password",
@@ -1839,10 +1839,6 @@ def create_gradio_app():
                         allowed_emails = os.getenv("ALLOWED_HISTORY_EMAILS", "").split(",")
                         allowed_emails = [e.strip().lower() for e in allowed_emails if e.strip()]
 
-                        # If no allowed emails configured, allow all
-                        if not allowed_emails:
-                            return gr.update(visible=True), gr.update(visible=False), gr.update(value=True), gr.update(visible=False)
-
                         user_email = "anonymous"
                         if request:
                             try:
@@ -1853,12 +1849,16 @@ def create_gradio_app():
                             except Exception:
                                 pass
 
-                        if user_email in allowed_emails:
-                            # Allowed user - can use env keys
-                            return gr.update(visible=True), gr.update(visible=False), gr.update(value=True), gr.update(visible=False)
+                        # Check if user is allowed (or if no restrictions configured)
+                        is_allowed = (not allowed_emails) or (user_email in allowed_emails)
+
+                        if is_allowed:
+                            # Allowed user - show env keys option, hide BYOK notice
+                            # Returns: byok_notice, env_keys_container, use_env_keys, api_key_inputs
+                            return gr.update(visible=False), gr.update(visible=True), gr.update(value=True), gr.update(visible=False)
                         else:
-                            # Not allowed - must BYOK
-                            return gr.update(visible=False), gr.update(visible=True), gr.update(value=False), gr.update(visible=True)
+                            # Not allowed - hide env keys option, show BYOK notice and API inputs
+                            return gr.update(visible=True), gr.update(visible=False), gr.update(value=False), gr.update(visible=True)
 
                     process_btn = gr.Button(
                         "🚀 Start Pipeline",
@@ -2265,7 +2265,7 @@ def create_gradio_app():
         app.load(
             fn=check_env_keys_access,
             inputs=[],
-            outputs=[env_keys_container, byok_notice, use_env_keys, api_key_inputs],
+            outputs=[byok_notice, env_keys_container, use_env_keys, api_key_inputs],
         )
 
     return app, css
