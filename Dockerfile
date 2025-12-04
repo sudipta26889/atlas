@@ -11,9 +11,15 @@ ENV GRADIO_ANALYTICS_ENABLED=False
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
-    nodejs \
-    npm \
+    ca-certificates \
+    gnupg \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js 20.x (required for yt-dlp JS challenge providers)
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && node --version
 
 # Set working directory
 WORKDIR /app
