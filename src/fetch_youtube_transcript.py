@@ -103,10 +103,16 @@ class YouTubeTranscriptFetcher:
         """
         srt_content = []
         for i, entry in enumerate(transcript_data, 1):
-            start_time = entry.get('start', 0)
-            duration = entry.get('duration', 0)
+            # Handle both dict (old API) and FetchedTranscriptSnippet (new API) formats
+            if hasattr(entry, 'start'):
+                start_time = entry.start
+                duration = entry.duration
+                text = entry.text
+            else:
+                start_time = entry.get('start', 0)
+                duration = entry.get('duration', 0)
+                text = entry.get('text', '')
             end_time = start_time + duration
-            text = entry.get('text', '')
 
             # Convert seconds to SRT timestamp format (HH:MM:SS,mmm)
             def format_time(seconds):
