@@ -1786,10 +1786,26 @@ def create_gradio_app():
 
                     gr.HTML('<h3 class="section-header">🔑 API Configuration</h3>')
 
-                    use_env_keys = gr.Checkbox(
-                        value=True,
-                        label="Use Environment Variables for API Keys",
-                        info="Check if you have OPENAI_API_KEY and YOUTUBE_API_KEY set as environment variables",
+                    # Container for env keys option (only visible to allowed users)
+                    with gr.Column(visible=True) as env_keys_container:
+                        use_env_keys = gr.Checkbox(
+                            value=True,
+                            label="Use Environment Variables for API Keys",
+                            info="Check if you have OPENAI_API_KEY and YOUTUBE_API_KEY set as environment variables",
+                        )
+
+                    # BYOK notice for non-allowed users
+                    byok_notice = gr.HTML(
+                        value="""
+                        <div style='padding: 12px; background: linear-gradient(135deg, #667eea22, #764ba222);
+                                    border-radius: 8px; border-left: 4px solid #667eea; margin-bottom: 12px;'>
+                            <p style='margin: 0; color: var(--body-text-color);'>
+                                <strong>🔑 Bring Your Own Keys (BYOK)</strong><br>
+                                <span style='font-size: 0.9em;'>Please enter your own API keys to use this service.</span>
+                            </p>
+                        </div>
+                        """,
+                        visible=False,
                     )
 
                     with gr.Column(visible=False) as api_key_inputs:
@@ -1816,6 +1832,33 @@ def create_gradio_app():
                         inputs=[use_env_keys],
                         outputs=[api_key_inputs],
                     )
+
+                    # Check if user is allowed to use env keys
+                    def check_env_keys_access(request: gr.Request = None):
+                        """Check if user can use environment API keys."""
+                        allowed_emails = os.getenv("ALLOWED_HISTORY_EMAILS", "").split(",")
+                        allowed_emails = [e.strip().lower() for e in allowed_emails if e.strip()]
+
+                        # If no allowed emails configured, allow all
+                        if not allowed_emails:
+                            return gr.update(visible=True), gr.update(visible=False), gr.update(value=True), gr.update(visible=False)
+
+                        user_email = "anonymous"
+                        if request:
+                            try:
+                                import gradiologin as gl
+                                user = gl.get_user(request)
+                                if user:
+                                    user_email = user.get("email", "").lower()
+                            except Exception:
+                                pass
+
+                        if user_email in allowed_emails:
+                            # Allowed user - can use env keys
+                            return gr.update(visible=True), gr.update(visible=False), gr.update(value=True), gr.update(visible=False)
+                        else:
+                            # Not allowed - must BYOK
+                            return gr.update(visible=False), gr.update(visible=True), gr.update(value=False), gr.update(visible=True)
 
                     process_btn = gr.Button(
                         "🚀 Start Pipeline",
@@ -2216,6 +2259,13 @@ def create_gradio_app():
             fn=check_history_access,
             inputs=[],
             outputs=[history_content, history_access_denied],
+        )
+
+        # Check env keys access on page load (BYOK for non-allowed users)
+        app.load(
+            fn=check_env_keys_access,
+            inputs=[],
+            outputs=[env_keys_container, byok_notice, use_env_keys, api_key_inputs],
         )
 
     return app, css
