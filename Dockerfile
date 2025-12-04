@@ -30,6 +30,12 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Upgrade yt-dlp to latest (YouTube frequently changes their API)
+RUN pip install --no-cache-dir --upgrade yt-dlp
+
+# Verify node is available for yt-dlp
+RUN node --version && which node
+
 # Copy application code
 COPY . .
 
