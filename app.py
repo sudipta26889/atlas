@@ -286,7 +286,7 @@ def step2_fetch_transcripts(
 
         # Format transcript results
         transcripts_output = format_transcript_results(
-            transcript_paths, videos, pipeline.transcripts_folder
+            transcript_paths, videos, pipeline.transcripts_folder, fetch_results
         )
         pipeline_state["transcripts_output"] = transcripts_output
 
@@ -775,9 +775,16 @@ def format_assignments_results(
 
 
 def format_transcript_results(
-    transcript_paths: List[str], videos: List[Dict], transcripts_folder: str
+    transcript_paths: List[str], videos: List[Dict], transcripts_folder: str, fetch_results: Optional[Dict] = None
 ) -> str:
-    """Format the transcript fetching results with full transcript content."""
+    """Format the transcript fetching results with full transcript content.
+    
+    Args:
+        transcript_paths: List of successful transcript file paths.
+        videos: List of video information dictionaries.
+        transcripts_folder: Folder where transcripts are stored.
+        fetch_results: Dictionary with URL as keys and dict with 'success' and 'error' as values.
+    """
     if not videos:
         return "❌ No videos to fetch transcripts from."
 
@@ -787,11 +794,22 @@ def format_transcript_results(
 
     # Create a mapping of video IDs to transcripts
     transcript_files = {Path(tp).stem.split(".")[0]: tp for tp in transcript_paths}
+    
+    # Create a mapping of URLs to error messages from fetch_results
+    url_to_error = {}
+    if fetch_results:
+        for url, result_data in fetch_results.items():
+            if isinstance(result_data, dict):
+                if not result_data.get("success", False):
+                    url_to_error[url] = result_data.get("error", "Unknown error")
+            elif not result_data:  # Handle legacy boolean format
+                url_to_error[url] = "Failed to fetch transcript"
 
     for i, video in enumerate(videos, 1):
         title = video.get("title", "Unknown Title")
         video_id = video.get("video_id", "")
         channel = video.get("channel", "Unknown Channel")
+        video_url = video.get("url", "")
 
         result += f"## {i}. {title}\n"
         result += f"**Channel:** {channel}\n\n"
@@ -850,9 +868,9 @@ def format_transcript_results(
             except Exception as e:
                 result += f"❌ Error reading transcript: {str(e)}\n\n"
         else:
-            result += (
-                f"❌ **Transcript not available** - Failed to fetch from YouTube\n\n"
-            )
+            # Show specific error message if available
+            error_msg = url_to_error.get(video_url, "Failed to fetch from YouTube")
+            result += f"❌ **Transcript not available** - {error_msg}\n\n"
 
         result += "---\n\n"
 

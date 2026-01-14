@@ -7,13 +7,23 @@ services:
       context: .
       dockerfile: Dockerfile
     environment:
+      # API Keys (set these in environment variables)
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - YOUTUBE_API_KEY=${YOUTUBE_API_KEY}
+      - YOUTUBE_PROXY=${YOUTUBE_PROXY:-}
+      # MySQL Configuration
       - MYSQL_HOST=${MYSQL_HOST:-mysql}
       - MYSQL_PORT=${MYSQL_PORT:-3306}
       - MYSQL_USER=${MYSQL_USER:-atlas_db_user}
       - MYSQL_PASSWORD=${MYSQL_PASSWORD}
       - MYSQL_DATABASE=${MYSQL_DATABASE:-atlas_db}
+      # Google OAuth Configuration (optional - app works without auth if not set)
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - APP_URL=${APP_URL:-http://localhost:7860}
+      # History Tab Access Control (comma-separated emails, empty = allow all)
+      - ALLOWED_HISTORY_EMAILS=${ALLOWED_HISTORY_EMAILS:-}
+      # Gradio Configuration
       - GRADIO_SERVER_NAME=0.0.0.0
       - GRADIO_ANALYTICS_ENABLED=False
     ports:
@@ -22,17 +32,28 @@ services:
       - atlas_output:/app/output
     networks:
       - atlas_network
+    # For non-Swarm (Docker Compose) mode - ignored in Swarm
+    restart: unless-stopped
+    # For Swarm mode
     deploy:
       mode: replicated
       replicas: 1
       restart_policy:
         condition: on-failure
-        delay: 5s
+        delay: 10s
         max_attempts: 3
         window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: start-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
       resources:
         limits:
-          cpus: "2"
+          cpus: "2.0"
           memory: 4G
         reservations:
           cpus: "0.5"
@@ -48,7 +69,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 90s
 
 volumes:
   atlas_output:

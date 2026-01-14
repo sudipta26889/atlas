@@ -14,6 +14,7 @@ services:
       # API Keys (set these in Portainer environment variables)
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - YOUTUBE_API_KEY=${YOUTUBE_API_KEY}
+      - YOUTUBE_PROXY=${YOUTUBE_PROXY:-}
       # MySQL Configuration
       - MYSQL_HOST=${MYSQL_HOST}
       - MYSQL_PORT=${MYSQL_PORT:-3306}
@@ -35,6 +36,10 @@ services:
       - atlas_output:/app/output
     networks:
       - atlas_net
+    # For non-Swarm (Docker Compose) mode - ignored in Swarm
+    restart: unless-stopped
+    # For Swarm mode - shows warnings in non-Swarm but is mostly ignored
+    # Note: deploy.resources.limits works in both modes
     deploy:
       mode: replicated
       replicas: 1
@@ -51,6 +56,7 @@ services:
       rollback_config:
         parallelism: 1
         delay: 10s
+      # Resource limits work in both Swarm and non-Swarm modes
       resources:
         limits:
           cpus: "2.0"
@@ -71,5 +77,8 @@ volumes:
 
 networks:
   atlas_net:
-    driver: overlay
+    # bridge works in both Swarm and non-Swarm modes
+    # For Swarm mode, you can change to 'overlay' if needed
+    driver: bridge
+    # attachable works in both modes (allows external containers to connect)
     attachable: true

@@ -156,6 +156,14 @@ class YouTubeTranscriptFetcher:
             # Try to list available transcripts first
             try:
                 transcript_list = ytt_api.list(video_id)
+                
+                # Log available languages for debugging
+                available_languages = [t.language_code for t in transcript_list]
+                if available_languages:
+                    print(f"[TRANSCRIPT-API] Available languages for {video_id}: {', '.join(available_languages)}")
+                else:
+                    print(f"[TRANSCRIPT-API] No transcripts available for {video_id}")
+                    return False, "No transcripts available for this video (transcript list is empty)"
 
                 # Try to find transcript in preferred language
                 transcript_data = None
@@ -167,16 +175,33 @@ class YouTubeTranscriptFetcher:
 
                 # If no match, use the first available
                 if transcript_data is None and transcript_list:
+                    first_lang = transcript_list[0].language_code
                     transcript_data = transcript_list[0].fetch()
-                    print(f"[TRANSCRIPT-API] Using first available transcript for {video_id}")
+                    print(f"[TRANSCRIPT-API] Using first available transcript ({first_lang}) for {video_id}")
 
-            except Exception:
-                # Direct fetch as fallback
-                transcript_data = ytt_api.fetch(video_id)
-                print(f"[TRANSCRIPT-API] Direct fetch succeeded for {video_id}")
+            except Exception as list_error:
+                # Log the error but try direct fetch as fallback
+                error_msg = str(list_error)
+                print(f"[TRANSCRIPT-API] list() failed for {video_id}: {error_msg}")
+                
+                # Try direct fetch as fallback
+                try:
+                    transcript_data = ytt_api.fetch(video_id)
+                    print(f"[TRANSCRIPT-API] Direct fetch succeeded for {video_id}")
+                except Exception as fetch_error:
+                    # Both methods failed, return detailed error
+                    fetch_error_msg = str(fetch_error)
+                    if "disabled" in error_msg.lower() or "disabled" in fetch_error_msg.lower():
+                        return False, "Transcripts are disabled for this video"
+                    elif "not found" in error_msg.lower() or "not found" in fetch_error_msg.lower():
+                        return False, f"No transcript found. List error: {error_msg}, Fetch error: {fetch_error_msg}"
+                    elif "unavailable" in error_msg.lower() or "unavailable" in fetch_error_msg.lower():
+                        return False, "Video is unavailable"
+                    else:
+                        return False, f"Both list() and fetch() failed. List: {error_msg}, Fetch: {fetch_error_msg}"
 
             if not transcript_data:
-                return False, "No transcript data retrieved"
+                return False, "No transcript data retrieved after successful list/fetch"
 
             # Convert to SRT and save
             srt_content = self._format_transcript_to_srt(transcript_data, video_id)
@@ -199,7 +224,14 @@ class YouTubeTranscriptFetcher:
             return False, error_msg
 
     def _fetch_with_ytdlp(self, url: str, video_id: str) -> Tuple[bool, Optional[str]]:
-        """Fetch transcript using yt-dlp as fallback.
+        """Fetch transcript using yt-dlp with robust fallback options.
+
+        yt-dlp is powerful and can bypass many restrictions that youtube-transcript-api cannot:
+        - Uses cookies for authentication (bypasses bot detection)
+        - Supports multiple player clients
+        - Can handle region restrictions
+        - Works around IP blocks better
+        - Supports multiple subtitle languages
 
         Args:
             url (str): YouTube video URL.
@@ -211,52 +243,136 @@ class YouTubeTranscriptFetcher:
         try:
             from yt_dlp import YoutubeDL
 
-            opts = {
-                "skip_download": True,
-                "writesubtitles": True,
-                "writeautomaticsub": True,
-                "subtitleslangs": [self.language],
-                "subtitlesformat": "srt",
-                "outtmpl": os.path.join(self.output_folder, "%(id)s.%(ext)s"),
-                "socket_timeout": 120,
-                "retries": 3,
-                "extractor_args": {"youtube": {"player_client": ["web_creator", "mweb", "web"]}},
-                "quiet": True,
-                "no_warnings": True,
-                "geo_bypass": True,
-            }
+            # Try multiple languages (preferred first, then English, then any available)
+            languages_to_try = [self.language]
+            if self.language != 'en':
+                languages_to_try.append('en')
+            # Add common languages as fallback
+            languages_to_try.extend(['en-US', 'en-GB', 'en-CA', 'en-AU'])
 
-            # Add proxy if configured
-            if self.proxy:
-                opts["proxy"] = self.proxy
-                print(f"[YT-DLP] Using proxy for {video_id}")
+            # Try different player clients in order of reliability
+            player_clients = [
+                ["web"],  # Standard web client
+                ["web_creator"],  # Creator client
+                ["mweb"],  # Mobile web
+                ["android"],  # Android client
+                ["ios"],  # iOS client
+                ["web", "mweb", "web_creator"],  # Multiple clients
+            ]
 
             # Check for cookies file
+            cookies_path = None
             cookies_paths = [
                 "/app/cookies.txt",
                 os.path.join(os.path.dirname(__file__), "..", "cookies.txt"),
                 os.path.expanduser("~/cookies.txt"),
+                "cookies.txt",  # Current directory
             ]
-            for cookies_path in cookies_paths:
-                if os.path.exists(cookies_path):
-                    opts["cookiefile"] = cookies_path
+            for path in cookies_paths:
+                if os.path.exists(path):
+                    cookies_path = path
+                    print(f"[YT-DLP] Using cookies from: {path}")
                     break
 
-            with YoutubeDL(opts) as ydl:
-                ydl.download([url])
+            # Try each player client configuration
+            last_error = None
+            for client_list in player_clients:
+                try:
+                    opts = {
+                        "skip_download": True,
+                        "writesubtitles": True,
+                        "writeautomaticsub": True,  # Try auto-generated if manual not available
+                        "subtitleslangs": languages_to_try,
+                        "subtitlesformat": "srt",
+                        "outtmpl": os.path.join(self.output_folder, "%(id)s.%(ext)s"),
+                        "socket_timeout": 120,
+                        "retries": 3,
+                        "extractor_args": {"youtube": {"player_client": client_list}},
+                        "quiet": True,
+                        "no_warnings": False,  # Show warnings for debugging
+                        "geo_bypass": True,
+                        "ignoreerrors": False,
+                    }
 
-            # Check if file was created
-            expected_path = os.path.join(self.output_folder, f"{video_id}.{self.language}.srt")
-            if os.path.exists(expected_path):
-                print(f"[YT-DLP] ✓ Saved transcript to {expected_path}")
-                return True, None
+                    # Add proxy if configured
+                    if self.proxy:
+                        opts["proxy"] = self.proxy
+                        print(f"[YT-DLP] Using proxy for {video_id}")
+
+                    # Add cookies if available
+                    if cookies_path:
+                        opts["cookiefile"] = cookies_path
+
+                    with YoutubeDL(opts) as ydl:
+                        # Suppress stdout but keep stderr for errors
+                        ydl.download([url])
+
+                    # Check for any created transcript file (try multiple language codes)
+                    for lang in languages_to_try:
+                        # Try different possible filename patterns
+                        possible_paths = [
+                            os.path.join(self.output_folder, f"{video_id}.{lang}.srt"),
+                            os.path.join(self.output_folder, f"{video_id}.{lang[:2]}.srt"),  # Short code
+                            os.path.join(self.output_folder, f"{video_id}.srt"),  # No language code
+                        ]
+                        
+                        for path in possible_paths:
+                            if os.path.exists(path):
+                                # If it's not in the preferred language, rename it
+                                preferred_path = os.path.join(self.output_folder, f"{video_id}.{self.language}.srt")
+                                if path != preferred_path:
+                                    import shutil
+                                    shutil.move(path, preferred_path)
+                                    print(f"[YT-DLP] Renamed transcript from {os.path.basename(path)} to {os.path.basename(preferred_path)}")
+                                
+                                print(f"[YT-DLP] ✓ Saved transcript to {preferred_path}")
+                                return True, None
+                        
+                        # Also check for any .srt file with video_id
+                        transcript_dir = self.output_folder
+                        if os.path.exists(transcript_dir):
+                            for filename in os.listdir(transcript_dir):
+                                if filename.startswith(video_id) and filename.endswith('.srt'):
+                                    found_path = os.path.join(transcript_dir, filename)
+                                    preferred_path = os.path.join(self.output_folder, f"{video_id}.{self.language}.srt")
+                                    if found_path != preferred_path:
+                                        import shutil
+                                        shutil.move(found_path, preferred_path)
+                                    print(f"[YT-DLP] ✓ Saved transcript to {preferred_path}")
+                                    return True, None
+
+                    # If we get here, download succeeded but no transcript file found
+                    # This might mean the video has no transcripts
+                    last_error = "Download completed but no transcript file was created (video may not have transcripts)"
+                    break  # Don't try other clients if download succeeded
+
+                except Exception as client_error:
+                    error_msg = str(client_error)
+                    last_error = error_msg
+                    # Continue to next client configuration
+                    print(f"[YT-DLP] Player client {client_list} failed: {error_msg[:100]}")
+                    continue
+
+            # If all client configurations failed
+            if last_error:
+                # Check if it's a known error type
+                error_lower = last_error.lower()
+                if "no subtitles" in error_lower or "no captions" in error_lower:
+                    return False, "Video has no subtitles/captions available"
+                elif "private" in error_lower or "unavailable" in error_lower:
+                    return False, "Video is private or unavailable"
+                elif "blocked" in error_lower or "restricted" in error_lower:
+                    return False, f"Access blocked/restricted: {last_error[:200]}"
+                else:
+                    return False, f"All yt-dlp methods failed. Last error: {last_error[:200]}"
             else:
-                return False, "Transcript file not created"
+                return False, "Unknown error: No transcript file created and no error reported"
 
         except Exception as e:
-            return False, str(e)
+            error_msg = str(e)
+            return False, f"yt-dlp exception: {error_msg[:200]}"
 
-    def fetch_transcript(self, url: str) -> bool:
+    def fetch_transcript(self, url: str) -> Tuple[bool, Optional[str]]:
         """Fetch transcript for a single YouTube video.
 
         Uses youtube-transcript-api first (no cookies needed), falls back to yt-dlp.
@@ -265,28 +381,33 @@ class YouTubeTranscriptFetcher:
             url (str): YouTube video URL.
 
         Returns:
-            bool: True if transcript was successfully downloaded, False otherwise.
+            Tuple[bool, Optional[str]]: (success, error_message)
+                - success: True if transcript was successfully downloaded, False otherwise.
+                - error_message: Error message if failed, None if successful.
         """
         video_id = self._extract_video_id(url)
         if not video_id:
-            print(f"[ERROR] Could not extract video ID from: {url}")
-            return False
+            error_msg = f"Could not extract video ID from: {url}"
+            print(f"[ERROR] {error_msg}")
+            return False, error_msg
 
         # Method 1: Try youtube-transcript-api (no cookies required)
         print(f"[FETCH] Trying youtube-transcript-api for {video_id}...")
         success, error = self._fetch_with_transcript_api(video_id)
         if success:
-            return True
+            return True, None
         print(f"[FETCH] youtube-transcript-api failed: {error}")
 
         # Method 2: Fall back to yt-dlp
         print(f"[FETCH] Falling back to yt-dlp for {video_id}...")
         success, error = self._fetch_with_ytdlp(url, video_id)
         if success:
-            return True
+            return True, None
         print(f"[FETCH] yt-dlp also failed: {error}")
 
-        return False
+        # Combine error messages from both attempts
+        final_error = f"Both methods failed. Last error: {error}" if error else "Unknown error"
+        return False, final_error
 
     def _fetch_transcripts_sequential(self, urls: List[str]) -> dict:
         """Fetch transcripts sequentially (one at a time).
@@ -295,12 +416,13 @@ class YouTubeTranscriptFetcher:
             urls (List[str]): List of YouTube video URLs.
 
         Returns:
-            dict: Dictionary with URLs as keys and success status as values.
+            dict: Dictionary with URLs as keys and dict with 'success' and 'error' as values.
         """
         results = {}
         for url in urls:
             print(f"Fetching transcript for: {url}")
-            results[url] = self.fetch_transcript(url)
+            success, error = self.fetch_transcript(url)
+            results[url] = {"success": success, "error": error}
         return results
 
     def _fetch_transcripts_parallel(self, urls: List[str]) -> dict:
@@ -310,7 +432,7 @@ class YouTubeTranscriptFetcher:
             urls (List[str]): List of YouTube video URLs.
 
         Returns:
-            dict: Dictionary with URLs as keys and success status as values.
+            dict: Dictionary with URLs as keys and dict with 'success' and 'error' as values.
         """
         results = {}
 
@@ -324,13 +446,14 @@ class YouTubeTranscriptFetcher:
             for future in as_completed(future_to_url):
                 url = future_to_url[future]
                 try:
-                    success = future.result()
-                    results[url] = success
-                    status = "Success" if success else "Failed"
+                    success, error = future.result()
+                    results[url] = {"success": success, "error": error}
+                    status = "Success" if success else f"Failed: {error}"
                     print(f"Completed {url}: {status}")
                 except Exception as e:
-                    results[url] = False
-                    print(f"Error processing {url}: {str(e)}")
+                    error_msg = f"Exception during processing: {str(e)}"
+                    results[url] = {"success": False, "error": error_msg}
+                    print(f"Error processing {url}: {error_msg}")
 
         return results
 
@@ -341,7 +464,7 @@ class YouTubeTranscriptFetcher:
             urls (List[str]): List of YouTube video URLs.
 
         Returns:
-            dict: Dictionary with URLs as keys and success status as values.
+            dict: Dictionary with URLs as keys and dict with 'success' and 'error' as values.
         """
         if not urls:
             return {}
@@ -378,6 +501,13 @@ if __name__ == "__main__":
     results = fetcher.fetch_transcripts(urls)
 
     # Print results
-    for url, success in results.items():
-        status = "Success" if success else "Failed"
+    for url, result_data in results.items():
+        if isinstance(result_data, dict):
+            success = result_data.get("success", False)
+            error = result_data.get("error")
+            status = "Success" if success else f"Failed: {error}"
+        else:
+            # Handle legacy boolean format
+            success = result_data
+            status = "Success" if success else "Failed"
         print(f"{url}: {status}")
